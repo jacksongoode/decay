@@ -1,93 +1,175 @@
-use futures_util::stream::StreamExt;
-use futures_util::SinkExt;
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock};
-use warp::ws::{Message as WsMessage, WebSocket};
-use warp::Filter;
-
+use axum::{
+    extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade},
+    http::{HeaderName, Method},
+    response::Response,
+    routing::get,
+    Router,
+};
+use axum_server::Handle;
+use decay::config::Config;
 use decay::types::{Message, User};
+use dotenv::dotenv;
+use env_logger::init;
+use futures_util::{sink::SinkExt, stream::StreamExt};
+use std::{
+    collections::HashMap,
+    net::SocketAddr,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+};
+use tokio::sync::{mpsc, RwLock};
+use tower_http::{cors::CorsLayer, services::ServeDir, trace::TraceLayer};
 
 /// Our global unique user id counter.
 static NEXT_USER_ID: AtomicUsize = AtomicUsize::new(1);
 
 /// Our state of currently connected users.
-type Users = Arc<RwLock<HashMap<usize, mpsc::UnboundedSender<Result<WsMessage, warp::Error>>>>>;
+type Users = Arc<RwLock<HashMap<usize, mpsc::UnboundedSender<Result<WsMessage, axum::Error>>>>>;
 
 #[tokio::main]
 async fn main() {
+    // Load .env file
+    dotenv().ok();
+
+    // Load configuration
+    let config = Config::default();
+
+    // Setup logging
+    init();
+
     // Keep track of all connected users
     let users = Users::default();
 
-    // Turn our "state" into a new Filter...
-    let users = warp::any().map(move || users.clone());
+    // Create our application with routes
+    let app = create_routes(users);
 
-    // WebSocket handler
-    let routes = warp::path("ws")
-        .and(warp::ws())
-        .and(users)
-        .map(|ws: warp::ws::Ws, users| {
-            ws.on_upgrade(move |socket| handle_connection(socket, users))
-        })
-        .or(warp::path("static").and(warp::fs::dir("www")))
-        .or(warp::path::end().and(warp::fs::file("www/index.html")));
+    // Parse addresses
+    let http_addr: SocketAddr = format!("{}:{}", config.host, config.port)
+        .parse()
+        .expect("Invalid HTTP address");
 
-    println!("Server started at http://localhost:3030");
-    warp::serve(routes).run(([0, 0, 0, 0], 3030)).await;
+    // Create shutdown handle
+    let handle = Handle::new();
+
+    println!("Starting HTTP server on {}", http_addr);
+
+    // Start HTTP server
+    let http_server = axum_server::bind(http_addr)
+        .handle(handle.clone())
+        .serve(app.clone().into_make_service());
+
+    // If TLS is enabled, also start HTTPS server
+    if config.tls_enabled {
+        let https_addr: SocketAddr = format!("{}:{}", config.host, config.tls_port)
+            .parse()
+            .expect("Invalid HTTPS address");
+
+        let cert_path = config
+            .cert_path
+            .expect("TLS enabled but no cert path provided");
+        let key_path = config
+            .key_path
+            .expect("TLS enabled but no key path provided");
+
+        println!("Starting HTTPS server on {}", https_addr);
+
+        let config = axum_server::tls_rustls::RustlsConfig::from_pem_file(cert_path, key_path)
+            .await
+            .expect("Failed to load TLS config");
+
+        let https_server = axum_server::bind_rustls(https_addr, config)
+            .handle(handle)
+            .serve(app.into_make_service());
+
+        // Run both servers
+        tokio::select! {
+            result = http_server => {
+                if let Err(e) = result {
+                    eprintln!("HTTP server error: {}", e);
+                }
+            }
+            result = https_server => {
+                if let Err(e) = result {
+                    eprintln!("HTTPS server error: {}", e);
+                }
+            }
+        }
+    } else {
+        // Just run HTTP server
+        if let Err(e) = http_server.await {
+            eprintln!("HTTP server error: {}", e);
+        }
+    }
+}
+
+fn create_routes(users: Users) -> Router {
+    let cors = CorsLayer::new()
+        .allow_origin(tower_http::cors::Any)
+        .allow_methods([Method::GET, Method::POST])
+        .allow_headers([HeaderName::from_static("content-type")]);
+
+    Router::new()
+        .route("/ws", get(ws_handler))
+        .nest_service("/static", ServeDir::new("www"))
+        .fallback_service(ServeDir::new("www").append_index_html_on_directories(true))
+        .with_state(users)
+        .layer(cors)
+        .layer(TraceLayer::new_for_http())
+}
+
+async fn ws_handler(
+    ws: WebSocketUpgrade,
+    axum::extract::State(users): axum::extract::State<Users>,
+) -> Response {
+    ws.on_upgrade(|socket| handle_connection(socket, users))
 }
 
 async fn handle_connection(ws: WebSocket, users: Users) {
     let my_id = NEXT_USER_ID.fetch_add(1, Ordering::Relaxed);
     println!("New user connected: {}", my_id);
 
-    let (mut user_ws_tx, mut user_ws_rx) = ws.split();
+    let (mut sender, mut receiver) = ws.split();
 
-    // Send welcome and setup user
+    // Send welcome message
     let welcome = serde_json::to_string(&Message::Welcome { user_id: my_id }).unwrap();
-    let _ = user_ws_tx.send(WsMessage::text(welcome)).await;
+    if sender.send(WsMessage::Text(welcome)).await.is_err() {
+        return;
+    }
 
     let (tx, mut rx) = mpsc::unbounded_channel();
     users.write().await.insert(my_id, tx);
     broadcast_user_list(&users).await;
 
-    // Forward messages to WebSocket
     let users_clone = users.clone();
-    let mut forward_task = tokio::spawn(async move {
+    let forward_task = tokio::spawn(async move {
         while let Some(message) = rx.recv().await {
-            if user_ws_tx.send(message?).await.is_err() {
+            if sender.send(message?).await.is_err() {
                 break;
             }
         }
-        Ok::<_, warp::Error>(())
+        Ok::<_, axum::Error>(())
     });
 
     // Handle incoming WebSocket messages
-    while let Some(Ok(msg)) = user_ws_rx.next().await {
-        if let Ok(text) = msg.to_str() {
-            if let Ok(message) = serde_json::from_str::<Message>(text) {
-                match message {
-                    Message::ConnectionRequest { from_id, to_id } => {
-                        if let Some(target_tx) = users_clone.read().await.get(&to_id) {
-                            let msg = serde_json::to_string(&Message::ConnectionRequest {
-                                from_id,
-                                to_id,
-                            })
-                            .unwrap();
-                            let _ = target_tx.send(Ok(WsMessage::text(msg)));
-                        }
+    while let Some(Ok(msg)) = receiver.next().await {
+        if let WsMessage::Text(text) = msg {
+            if let Ok(message) = serde_json::from_str::<Message>(&text) {
+                let target_id = match &message {
+                    Message::ConnectionRequest { to_id, .. } => Some(*to_id),
+                    Message::RTCOffer { to_id, .. } => Some(*to_id),
+                    Message::RTCAnswer { to_id, .. } => Some(*to_id),
+                    Message::RTCCandidate { to_id, .. } => Some(*to_id),
+                    Message::ConnectionResponse { from_id, .. } => Some(*from_id),
+                    _ => None,
+                };
+
+                if let Some(target_id) = target_id {
+                    if let Some(target_tx) = users_clone.read().await.get(&target_id) {
+                        let msg = serde_json::to_string(&message).unwrap();
+                        let _ = target_tx.send(Ok(WsMessage::Text(msg)));
                     }
-                    Message::ConnectionResponse { from_id, accepted } => {
-                        if let Some(target_tx) = users_clone.read().await.get(&from_id) {
-                            let msg = serde_json::to_string(&Message::ConnectionResponse {
-                                from_id: my_id,
-                                accepted,
-                            })
-                            .unwrap();
-                            let _ = target_tx.send(Ok(WsMessage::text(msg)));
-                        }
-                    }
-                    _ => {}
                 }
             }
         }
@@ -111,6 +193,6 @@ async fn broadcast_user_list(users: &Users) {
 
     let message = serde_json::to_string(&Message::UserList { users: user_list }).unwrap();
     for tx in users_lock.values() {
-        let _ = tx.send(Ok(WsMessage::text(message.clone())));
+        let _ = tx.send(Ok(WsMessage::Text(message.clone())));
     }
 }
