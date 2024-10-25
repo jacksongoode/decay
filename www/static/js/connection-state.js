@@ -11,7 +11,6 @@ export class ConnectionState {
       DISCONNECTED: "disconnected",
       FAILED: "failed",
     };
-    this.currentState = this.states.INITIALIZING;
     this.container = this.createContainer(parentContainer);
 
     // Initialize with CONNECTING state
@@ -29,31 +28,26 @@ export class ConnectionState {
 
     // Add visibility change handling
     this.handleVisibilityChange = this.handleVisibilityChange.bind(this);
-    document.addEventListener('visibilitychange', this.handleVisibilityChange);
-    
+    document.addEventListener("visibilitychange", this.handleVisibilityChange);
+
     // Enhanced unload handling
     this.handleBeforeUnload = this.handleBeforeUnload.bind(this);
-    window.addEventListener('beforeunload', this.handleBeforeUnload);
-    window.addEventListener('unload', this.handleBeforeUnload);
-    window.addEventListener('pagehide', this.handleBeforeUnload);
-    
+    window.addEventListener("beforeunload", this.handleBeforeUnload);
+    window.addEventListener("unload", this.handleBeforeUnload);
+    window.addEventListener("pagehide", this.handleBeforeUnload);
+
     this.startHeartbeat();
   }
 
-  createContainer(parentContainer) {
-    const container = document.createElement("div");
-    container.className = `connection-state state-${this.currentState}`;
-    container.id = `connection-${this.peerId}`;
-    container.innerHTML = `
-      <div class="stream-stats">
-        <h3>User ${this.peerId}</h3>
-        <div class="connection-status">Status: ${this.getStatusText()}</div>
-        <div class="bitrate">Bitrate: -- kbps</div>
-        <div class="duration">Duration: 0:00</div>
-      </div>
+  createContainer() {
+    const statsDiv = document.createElement("div");
+    statsDiv.className = "stream-stats";
+    statsDiv.innerHTML = `
+      <div class="connection-status">Status: ${this.getStatusText()}</div>
+      <div class="bitrate">Bitrate: -- kbps</div>
+      <div class="duration">Duration: 0:00</div>
     `;
-    parentContainer.appendChild(container);
-    return container;
+    return statsDiv;
   }
 
   getStatusText() {
@@ -94,30 +88,37 @@ export class ConnectionState {
     }
   }
 
-  setState(newState, metadata = {}) {
-    if (!this.container) return;
-
+  setState(newState) {
     const prevState = this.currentState;
     this.currentState = newState;
     this.connected = newState === this.states.CONNECTED;
 
-    if (this.connected && !this.startTime) {
-      this.startTime = Date.now();
+    // Ensure container exists
+    if (!this.container) {
+      this.container = this.createContainer();
     }
 
+    // Update the status text
+    const statusEl = this.container.querySelector(".connection-status");
+    if (statusEl) {
+      statusEl.textContent = `Status: ${this.getStatusText()}`;
+    }
+
+    // Don't hide the container, just update its content
     this.updateUI();
-    
-    // Ensure state change is emitted
-    this.emit("stateChange", { 
-      prevState, 
-      newState, 
-      metadata,
-      peerId: this.peerId 
+
+    this.emit("stateChange", {
+      prevState,
+      newState,
+      metadata: {},
+      peerId: this.peerId,
     });
 
-    // Clear timeout if connection succeeds
     if (newState === this.states.CONNECTED) {
       clearTimeout(this.connectionTimeout);
+      if (!this.startTime) {
+        this.startTime = Date.now();
+      }
     }
   }
 
@@ -172,29 +173,30 @@ export class ConnectionState {
     if (this.heartbeatInterval) {
       clearInterval(this.heartbeatInterval);
     }
-    // Clear all event listeners
     this.eventListeners.clear();
-
-    // Reset state
     this.connected = false;
     this.startTime = null;
 
-    // Remove DOM element
-    if (this.container && this.container.parentNode) {
-      this.container.parentNode.removeChild(this.container);
-      this.container = null;
+    // Don't remove or hide the container
+    if (this.container) {
+      this.container.querySelector(".connection-status").textContent =
+        "Status: Disconnected";
+      this.container.querySelector(".bitrate").textContent = "Bitrate: -- kbps";
+      this.container.querySelector(".duration").textContent = "Duration: 0:00";
     }
 
-    // Remove event listeners
-    document.removeEventListener('visibilitychange', this.handleVisibilityChange);
-    window.removeEventListener('beforeunload', this.handleBeforeUnload);
+    document.removeEventListener(
+      "visibilitychange",
+      this.handleVisibilityChange,
+    );
+    window.removeEventListener("beforeunload", this.handleBeforeUnload);
   }
 
   handleVisibilityChange() {
-    if (document.visibilityState === 'hidden' && this.connected) {
-      this.emit('connectionStateChange', { 
-        type: 'visibility',
-        visible: false 
+    if (document.visibilityState === "hidden" && this.connected) {
+      this.emit("connectionStateChange", {
+        type: "visibility",
+        visible: false,
       });
     }
   }
@@ -202,15 +204,15 @@ export class ConnectionState {
   handleBeforeUnload(event) {
     if (this.connected) {
       // Synchronous notification to ensure it's sent before page unload
-      this.emit('connectionStateChange', { 
-        type: 'unload',
-        immediate: true  // Flag for immediate handling
+      this.emit("connectionStateChange", {
+        type: "unload",
+        immediate: true, // Flag for immediate handling
       });
-      
+
       // For older browsers, delay unload slightly to ensure message sends
-      if (event.type === 'beforeunload') {
+      if (event.type === "beforeunload") {
         event.preventDefault();
-        event.returnValue = '';
+        event.returnValue = "";
       }
     }
   }
