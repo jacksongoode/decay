@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Audio Decay</title>
+    <style>
+        .user-list {
+            margin: 20px;
+            padding: 10px;
+            border: 1px solid #ccc;
+        }
+        .controls {
+            margin: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div class="user-list">
+        <h2>Connected Users</h2>
+        <ul id="users"></ul>
+    </div>
+
+    <div class="controls">
+        <button id="connect">Connect</button>
+        <button id="disconnect" disabled>Disconnect</button>
+        <div id="status"></div>
+    </div>
+
+    <script type="module" src="/static/js/main.js"></script>
+</body>
+</html>
