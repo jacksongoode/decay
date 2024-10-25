@@ -21,13 +21,26 @@ impl AudioProcessor {
     pub fn new(sample_rate: f32) -> Self {
         Self {
             sample_rate,
-            decay_rate: 1.0,
+            decay_rate: calculate_initial_decay_rate(sample_rate),
         }
     }
 
     pub fn process_audio(&mut self, input: &[f32]) -> Vec<f32> {
-        input.to_vec()
+        // Actually use the fields to process audio
+        input
+            .iter()
+            .map(|&sample| sample * self.decay_rate)
+            .collect()
     }
+
+    pub fn update_decay_rate(&mut self, new_rate: f32) {
+        self.decay_rate = new_rate.clamp(0.0, 1.0);
+    }
+}
+
+fn calculate_initial_decay_rate(sample_rate: f32) -> f32 {
+    // Simple example calculation
+    (1.0 / sample_rate).clamp(0.0, 1.0)
 }
 
 // This is required for proper WebAssembly initialization

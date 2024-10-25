@@ -1,41 +1,34 @@
 export class AudioStreamManager {
-  constructor() {
+  constructor(connectionState) {
     this.stream = null;
-    this.audioContext = null;
     this.peerConnection = null;
+    this.connectionState = connectionState;
+    this.bitrateControl = {
+      min: 8, // 8 kbps minimum
+      max: 128, // 128 kbps maximum
+      current: 128,
+    };
+    this.startTime = null;
+    this.updateInterval = null;
+    this.remoteAudio = new Audio();
+    this.remoteAudio.autoplay = true;
+    this.remoteAudio.playsInline = true; // Important for iOS
+    this.audioContext = null;
+    this.audioInitialized = false;
+    this.setupStateHandlers(connectionState);
+  }
+
+  setupStateHandlers(connectionState) {
+    connectionState.on("connectionFailed", () => this.cleanup());
+    connectionState.on("stateChange", ({ newState }) => {
+      if (newState === connectionState.states.CONNECTED) {
+        this.startAudioDecay();
+      }
+    });
   }
 
   async initializeStream() {
     try {
-      console.log("Checking media devices support...");
-
-      // Check if mediaDevices exists, if not, try to get it
-      if (!navigator.mediaDevices) {
-        navigator.mediaDevices = {};
-      }
-
-      // Check if getUserMedia is supported
-      if (!navigator.mediaDevices.getUserMedia) {
-        navigator.mediaDevices.getUserMedia = function (constraints) {
-          const getUserMedia =
-            navigator.webkitGetUserMedia ||
-            navigator.mozGetUserMedia ||
-            navigator.msGetUserMedia;
-
-          if (!getUserMedia) {
-            return Promise.reject(
-              new Error("getUserMedia is not supported in this browser"),
-            );
-          }
-
-          return new Promise((resolve, reject) => {
-            getUserMedia.call(navigator, constraints, resolve, reject);
-          });
-        };
-      }
-
-      // Request permissions explicitly
-      console.log("Requesting microphone access...");
       this.stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           echoCancellation: true,
@@ -44,37 +37,10 @@ export class AudioStreamManager {
         },
         video: false,
       });
-
-      console.log("Microphone access granted");
-
-      // Create audio context with fallbacks
-      const AudioContext = window.AudioContext || window.webkitAudioContext;
-      this.audioContext = new AudioContext();
-
-      return true;
+      return this.stream;
     } catch (error) {
-      console.error("Error accessing microphone:", error);
-      let errorMessage = "Microphone access failed: ";
-
-      switch (error.name) {
-        case "NotAllowedError":
-          errorMessage += "Permission denied. Please allow microphone access.";
-          break;
-        case "NotFoundError":
-          errorMessage += "No microphone found.";
-          break;
-        case "NotReadableError":
-          errorMessage += "Microphone is already in use.";
-          break;
-        case "SecurityError":
-          errorMessage +=
-            "Media support is not available in insecure context. Please use HTTPS.";
-          break;
-        default:
-          errorMessage += error.message || "Unknown error";
-      }
-
-      throw new Error(errorMessage);
+      console.error("Microphone access failed:", error);
+      throw error;
     }
   }
 
@@ -84,45 +50,205 @@ export class AudioStreamManager {
         await this.initializeStream();
       }
 
-      console.log("Creating peer connection...");
+      // Create peer connection with basic STUN configuration
       this.peerConnection = new RTCPeerConnection({
-        iceServers: [
-          { urls: "stun:stun.l.google.com:19302" },
-          { urls: "stun:stun1.l.google.com:19302" },
-        ],
+        iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
       });
 
-      this.peerConnection.onicecandidate = onIceCandidate;
-      this.peerConnection.oniceconnectionstatechange = () => {
-        console.log(
-          "ICE Connection State:",
-          this.peerConnection.iceConnectionState,
-        );
+      // Add local audio track
+      this.stream.getTracks().forEach((track) => {
+        this.peerConnection.addTrack(track, this.stream);
+      });
+
+      // Connection state monitoring
+      this.peerConnection.onconnectionstatechange = () => {
+        const state = this.peerConnection.connectionState;
+        console.log("Connection state:", state);
+
+        switch (state) {
+          case "connecting":
+            this.connectionState.setState(
+              this.connectionState.states.CONNECTING,
+            );
+            break;
+          case "connected":
+            this.connectionState.setState(
+              this.connectionState.states.CONNECTED,
+            );
+            this.startAudioDecay();
+            break;
+          case "disconnected":
+          case "failed":
+          case "closed":
+            this.cleanup();
+            break;
+        }
       };
 
-      this.stream.getTracks().forEach((track) => {
-        console.log("Adding track to peer connection:", track.kind);
-        this.peerConnection.addTrack(track, this.stream);
+      // ICE connection state monitoring
+      this.peerConnection.oniceconnectionstatechange = () => {
+        const state = this.peerConnection.iceConnectionState;
+        console.log("ICE connection state:", state);
+
+        if (state === "failed") {
+          this.connectionState.setState(this.connectionState.states.FAILED);
+          this.cleanup();
+        }
+      };
+
+      this.peerConnection.onicecandidate = onIceCandidate;
+
+      // Add ontrack handler to verify audio reception
+      this.peerConnection.ontrack = (event) => {
+        console.log("Received remote track:", event.track.kind);
+        this.setupRemoteTrack(event.track, event.streams[0]);
+      };
+
+      // Verify local audio is being sent
+      const audioTracks = this.stream.getAudioTracks();
+      if (audioTracks.length === 0) {
+        throw new Error("No local audio track available");
+      }
+
+      // Monitor audio track state
+      audioTracks.forEach((track) => {
+        track.onended = () => {
+          console.error("Local audio track ended unexpectedly");
+          this.cleanup();
+        };
+        track.onmute = () => {
+          console.warn("Local audio track muted");
+        };
+        track.onunmute = () => {
+          console.log("Local audio track unmuted");
+        };
       });
 
       return this.peerConnection;
     } catch (error) {
-      console.error("Error creating peer connection:", error);
+      console.error("PeerConnection failed:", error);
+      this.connectionState.setState(this.connectionState.states.FAILED);
       throw error;
     }
   }
 
-  cleanup() {
-    if (this.peerConnection) {
-      this.peerConnection.close();
-      this.peerConnection = null;
+  startAudioDecay() {
+    this.startTime = Date.now();
+    this.bitrateControl.current = this.bitrateControl.max;
+
+    // Update bitrate every second
+    this.updateInterval = setInterval(() => {
+      const elapsedSeconds = (Date.now() - this.startTime) / 1000;
+      const decayFactor = Math.exp(-elapsedSeconds / 30); // 30-second decay constant
+
+      this.bitrateControl.current = Math.max(
+        this.bitrateControl.min,
+        this.bitrateControl.max * decayFactor,
+      );
+
+      this.updateBitrate();
+    }, 1000);
+
+    // Initial bitrate update
+    this.updateBitrate();
+  }
+
+  async updateBitrate() {
+    const sender = this.peerConnection
+      ?.getSenders()
+      .find((s) => s.track?.kind === "audio");
+
+    if (!sender) return;
+
+    try {
+      const params = sender.getParameters();
+      if (!params.encodings) {
+        params.encodings = [{}];
+      }
+
+      params.encodings[0].maxBitrate = this.bitrateControl.current * 1000;
+      await sender.setParameters(params);
+
+      this.connectionState.updateState({
+        currentBitrate: this.bitrateControl.current,
+        elapsedTime: Math.floor((Date.now() - this.startTime) / 1000),
+      });
+    } catch (error) {
+      console.warn("Failed to update bitrate:", error);
     }
+  }
+
+  async initializeAudio() {
+    if (this.audioInitialized) return;
+
+    // Create AudioContext on user gesture
+    this.audioContext = new (window.AudioContext ||
+      window.webkitAudioContext)();
+
+    // Resume audio context (needed for mobile)
+    if (this.audioContext.state === "suspended") {
+      await this.audioContext.resume();
+    }
+
+    this.audioInitialized = true;
+  }
+
+  setupRemoteTrack(track, stream) {
+    console.log("Setting up remote track:", track.kind);
+
+    if (track.kind === "audio") {
+      this.remoteAudio.srcObject = stream;
+
+      const playAudio = async () => {
+        try {
+          await this.initializeAudio();
+          await this.remoteAudio.play();
+        } catch (err) {
+          console.error("Audio playback failed:", err);
+
+          // Handle mobile autoplay restriction
+          const resumeAudio = async () => {
+            try {
+              await this.initializeAudio();
+              await this.remoteAudio.play();
+              document.removeEventListener("touchstart", resumeAudio);
+              document.removeEventListener("click", resumeAudio);
+            } catch (error) {
+              console.error("Retry playback failed:", error);
+            }
+          };
+
+          document.addEventListener("touchstart", resumeAudio, { once: true });
+          document.addEventListener("click", resumeAudio, { once: true });
+        }
+      };
+
+      playAudio();
+    }
+  }
+
+  cleanup() {
+    if (this.updateInterval) {
+      clearInterval(this.updateInterval);
+      this.updateInterval = null;
+    }
+
     if (this.stream) {
       this.stream.getTracks().forEach((track) => track.stop());
       this.stream = null;
     }
+
+    if (this.peerConnection) {
+      this.peerConnection.close();
+      this.peerConnection = null;
+    }
+
+    // Only set state if connectionState exists and hasn't been cleaned up
+    if (this.connectionState?.container) {
+      this.connectionState.setState(this.connectionState.states.DISCONNECTED);
+    }
+
+    this.startTime = null;
     console.log("AudioStreamManager cleaned up");
   }
 }
-
-export default AudioStreamManager;

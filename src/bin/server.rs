@@ -18,6 +18,7 @@ use std::{
         atomic::{AtomicUsize, Ordering},
         Arc,
     },
+    time::Duration,
 };
 use tokio::sync::{mpsc, RwLock};
 use tower_http::{cors::CorsLayer, services::ServeDir, trace::TraceLayer};
@@ -26,7 +27,7 @@ use tower_http::{cors::CorsLayer, services::ServeDir, trace::TraceLayer};
 static NEXT_USER_ID: AtomicUsize = AtomicUsize::new(1);
 
 /// Our state of currently connected users.
-type Users = Arc<RwLock<HashMap<usize, mpsc::UnboundedSender<Result<WsMessage, axum::Error>>>>>;
+type Users = Arc<RwLock<HashMap<usize, ConnectionState>>>;
 
 #[tokio::main]
 async fn main() {
@@ -128,57 +129,138 @@ async fn ws_handler(
 
 async fn handle_connection(ws: WebSocket, users: Users) {
     let my_id = NEXT_USER_ID.fetch_add(1, Ordering::Relaxed);
-    println!("New user connected: {}", my_id);
-
     let (mut sender, mut receiver) = ws.split();
+    let (tx, mut rx) = mpsc::unbounded_channel();
 
-    // Send welcome message
+    // Initialize connection state
+    let connection_state = ConnectionState {
+        last_activity: std::time::Instant::now(),
+        tx: tx.clone(),
+    };
+
+    // Store the connection state
+    users.write().await.insert(my_id, connection_state);
+
+    // Spawn timeout monitoring task
+    let timeout_task = tokio::spawn({
+        let users = users.clone();
+        async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(30));
+            let timeout_duration = Duration::from_secs(60);
+
+            loop {
+                interval.tick().await;
+                if let Some(state) = users.read().await.get(&my_id) {
+                    if state.last_activity.elapsed() > timeout_duration {
+                        let _ = state.tx.send(Ok(WsMessage::Close(None)));
+                        users.write().await.remove(&my_id);
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+        }
+    });
+
+    // Spawn heartbeat task
+    let heartbeat_task = tokio::spawn({
+        let tx = tx.clone();
+        async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(30));
+            loop {
+                interval.tick().await;
+                if tx.send(Ok(WsMessage::Ping(vec![]))).is_err() {
+                    break;
+                }
+            }
+        }
+    });
+
+    // Send initial welcome message
     let welcome = serde_json::to_string(&Message::Welcome { user_id: my_id }).unwrap();
     if sender.send(WsMessage::Text(welcome)).await.is_err() {
         return;
     }
 
-    let (tx, mut rx) = mpsc::unbounded_channel();
-    users.write().await.insert(my_id, tx);
+    // Broadcast updated user list
     broadcast_user_list(&users).await;
 
-    let users_clone = users.clone();
-    let forward_task = tokio::spawn(async move {
-        while let Some(message) = rx.recv().await {
-            if sender.send(message?).await.is_err() {
-                break;
+    // Spawn message forwarding task
+    let forward_task = tokio::spawn({
+        let mut sender = sender;
+        async move {
+            while let Some(message) = rx.recv().await {
+                if sender.send(message?).await.is_err() {
+                    break;
+                }
             }
+            Ok::<_, axum::Error>(())
         }
-        Ok::<_, axum::Error>(())
     });
 
-    // Handle incoming WebSocket messages
-    while let Some(Ok(msg)) = receiver.next().await {
-        if let WsMessage::Text(text) = msg {
-            if let Ok(message) = serde_json::from_str::<Message>(&text) {
-                let target_id = match &message {
-                    Message::ConnectionRequest { to_id, .. } => Some(*to_id),
-                    Message::RTCOffer { to_id, .. } => Some(*to_id),
-                    Message::RTCAnswer { to_id, .. } => Some(*to_id),
-                    Message::RTCCandidate { to_id, .. } => Some(*to_id),
-                    Message::ConnectionResponse { from_id, .. } => Some(*from_id),
-                    _ => None,
-                };
+    // Clone users for message handling
+    let users_clone = users.clone();
 
-                if let Some(target_id) = target_id {
-                    if let Some(target_tx) = users_clone.read().await.get(&target_id) {
-                        let msg = serde_json::to_string(&message).unwrap();
-                        let _ = target_tx.send(Ok(WsMessage::Text(msg)));
+    // Main message handling loop
+    while let Some(Ok(msg)) = receiver.next().await {
+        // Update last activity timestamp
+        if let Some(state) = users.write().await.get_mut(&my_id) {
+            state.last_activity = std::time::Instant::now();
+        }
+
+        match msg {
+            WsMessage::Text(text) => {
+                if let Ok(message) = serde_json::from_str::<Message>(&text) {
+                    match &message {
+                        // Handle broadcast messages
+                        Message::PeerStateChange { .. } => {
+                            let users_lock = users_clone.read().await;
+                            for state in users_lock.values() {
+                                let _ = state.tx.send(Ok(WsMessage::Text(text.clone())));
+                            }
+                        }
+                        // Handle targeted messages
+                        _ => {
+                            let target_id = match &message {
+                                Message::ConnectionRequest { to_id, .. } => Some(*to_id),
+                                Message::RTCOffer { to_id, .. } => Some(*to_id),
+                                Message::RTCAnswer { to_id, .. } => Some(*to_id),
+                                Message::RTCCandidate { to_id, .. } => Some(*to_id),
+                                Message::ConnectionResponse { from_id, .. } => Some(*from_id),
+                                _ => None,
+                            };
+
+                            if let Some(target_id) = target_id {
+                                if let Some(target_state) = users_clone.read().await.get(&target_id)
+                                {
+                                    let msg = serde_json::to_string(&message).unwrap();
+                                    let _ = target_state.tx.send(Ok(WsMessage::Text(msg)));
+                                }
+                            }
+                        }
                     }
                 }
             }
+            WsMessage::Pong(_) => {
+                // Update activity timestamp on pong response
+                if let Some(state) = users.write().await.get_mut(&my_id) {
+                    state.last_activity = std::time::Instant::now();
+                }
+            }
+            WsMessage::Close(_) => break,
+            _ => {} // Handle other message types if needed
         }
     }
 
     // Cleanup on disconnect
-    users_clone.write().await.remove(&my_id);
-    broadcast_user_list(&users_clone).await;
-    let _ = forward_task.abort();
+    users.write().await.remove(&my_id);
+    broadcast_user_list(&users).await;
+
+    // Abort background tasks
+    heartbeat_task.abort();
+    timeout_task.abort();
+    forward_task.abort();
 }
 
 async fn broadcast_user_list(users: &Users) {
@@ -192,7 +274,12 @@ async fn broadcast_user_list(users: &Users) {
         .collect();
 
     let message = serde_json::to_string(&Message::UserList { users: user_list }).unwrap();
-    for tx in users_lock.values() {
-        let _ = tx.send(Ok(WsMessage::Text(message.clone())));
+    for state in users_lock.values() {
+        let _ = state.tx.send(Ok(WsMessage::Text(message.clone())));
     }
+}
+
+struct ConnectionState {
+    last_activity: std::time::Instant,
+    tx: mpsc::UnboundedSender<Result<WsMessage, axum::Error>>,
 }
