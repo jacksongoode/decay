@@ -1,2 +1,3 @@
 js=application/javascript
+mjs=application/javascript
 wasm=application/wasm

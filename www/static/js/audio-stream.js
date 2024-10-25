@@ -35,9 +35,13 @@ export class AudioStreamManager {
     try {
       this.stream = await navigator.mediaDevices.getUserMedia({
         audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
+          // Set initial high-quality audio parameters
+          autoGainControl: false,
+          channelCount: 2,
+          echoCancellation: false,
+          noiseSuppression: false,
+          sampleRate: 48000,
+          sampleSize: 16,
         },
         video: false,
       });
@@ -167,7 +171,23 @@ export class AudioStreamManager {
         params.encodings = [{}];
       }
 
+      // Set both maxBitrate and priority
       params.encodings[0].maxBitrate = this.bitrateControl.current * 1000;
+      params.encodings[0].priority = "high";
+
+      // Add stereo and maxaveragebitrate to SDP
+      const transceiver = this.peerConnection
+        .getTransceivers()
+        .find((t) => t.sender === sender);
+
+      if (transceiver) {
+        const sendCodecs = RTCRtpSender.getCapabilities("audio").codecs;
+        const opusCodec = sendCodecs.find((c) => c.mimeType === "audio/opus");
+        if (opusCodec) {
+          transceiver.setCodecPreferences([opusCodec]);
+        }
+      }
+
       await sender.setParameters(params);
 
       this.connectionState.updateState({

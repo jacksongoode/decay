@@ -1,5 +1,5 @@
-import { AudioStreamManager } from "../../../www/js/static/audio-stream.js";
-import { ConnectionState } from "../../../www/js/static/connection-state.js";
+import { AudioStreamManager } from "./audio-stream.js";
+import { ConnectionState } from "./connection-state.js";
 
 class AudioDecayClient {
   constructor() {
@@ -10,6 +10,7 @@ class AudioDecayClient {
     this.audioManagers = new Map();
     this.users = new Map();
     this.logContainer = document.getElementById("connection-log");
+    this.activeConnection = null; // Track the active connection
     this.connect();
 
     // Listen for connection state changes
@@ -47,7 +48,8 @@ class AudioDecayClient {
       this.connections.delete(peerId);
     }
 
-    this.addLogEntry(`Disconnected from User ${peerId}`, "disconnect");
+    this.activeConnection = null;
+    this.updateUserList([...this.users.values()]);
   }
 
   addLogEntry(message, type = "info") {
@@ -75,29 +77,23 @@ class AudioDecayClient {
     // Update users map
     this.users = new Map(users.map((user) => [user.id, user]));
 
-    // Update user count
-    const totalUsers = users.length;
-    const userCountWrapper = document.getElementById("user-count-wrapper");
-    const userCount = document.getElementById("user-count");
-
-    if (totalUsers > 0) {
-      userCount.textContent = totalUsers;
-      userCountWrapper.style.display = "inline"; // Show the count when we have users
-    } else {
-      userCountWrapper.style.display = "none"; // Hide if no users
-    }
-
-    // Update UI
     users.forEach((user) => {
       const li = document.createElement("li");
       li.className = "user-item";
+      const isConnected = this.isPeerConnected(user.id);
+      if (isConnected) {
+        li.classList.add("connected");
+      }
 
-      const userInfo = document.createElement("div");
-      userInfo.className = "user-info";
+      const userRow = document.createElement("div");
+      userRow.className = "user-row";
+
+      const userIdentity = document.createElement("div");
+      userIdentity.className = "user-identity";
 
       const statusDot = document.createElement("span");
       statusDot.className = "status-indicator";
-      if (this.isPeerConnected(user.id)) {
+      if (isConnected) {
         statusDot.classList.add("connected");
       }
 
@@ -105,33 +101,46 @@ class AudioDecayClient {
       const isMe = user.id === this.userId;
       userName.textContent = `User ${user.id} ${isMe ? "(You)" : ""}`;
 
-      userInfo.appendChild(statusDot);
-      userInfo.appendChild(userName);
-      li.appendChild(userInfo);
+      userIdentity.appendChild(statusDot);
+      userIdentity.appendChild(userName);
+      userRow.appendChild(userIdentity);
 
       // Only show connect/disconnect button for other users
       if (!isMe) {
         const connectBtn = document.createElement("button");
-        const isConnected = this.isPeerConnected(user.id);
+        connectBtn.disabled = this.activeConnection && !isConnected;
 
-        // Update both text and class together
         if (isConnected) {
           connectBtn.textContent = "Disconnect";
           connectBtn.classList.add("connected");
         } else {
           connectBtn.textContent = "Connect";
-          connectBtn.classList.remove("connected");
         }
 
         connectBtn.onclick = () => {
-          const currentlyConnected = this.isPeerConnected(user.id);
-          if (currentlyConnected) {
+          if (isConnected) {
             this.disconnectFromPeer(user.id);
           } else {
             this.requestConnection(user.id);
           }
         };
-        li.appendChild(connectBtn);
+        userRow.appendChild(connectBtn);
+      }
+
+      li.appendChild(userRow);
+
+      // Add connection state if it exists
+      const connection = this.connections.get(user.id);
+      if (connection) {
+        // Create container if it doesn't exist
+        if (!connection.container) {
+          connection.container = connection.createContainer();
+        }
+        // Add the connection's container directly
+        const statsContainer = document.createElement("div");
+        statsContainer.className = "stream-stats";
+        statsContainer.appendChild(connection.container);
+        li.appendChild(statsContainer);
       }
 
       userList.appendChild(li);
@@ -139,7 +148,7 @@ class AudioDecayClient {
   }
 
   isPeerConnected(peerId) {
-    return this.connections.has(peerId);
+    return this.activeConnection === peerId;
   }
 
   disconnectFromPeer(peerId) {
@@ -152,6 +161,7 @@ class AudioDecayClient {
     this.ws.send(JSON.stringify(stateMsg));
 
     this.cleanupConnection(peerId);
+    this.activeConnection = null;
     this.updateUserList([...this.users.values()]);
   }
 
@@ -245,6 +255,16 @@ class AudioDecayClient {
   }
 
   async handleConnectionRequest(message) {
+    if (this.activeConnection) {
+      const response = {
+        type: "ConnectionResponse",
+        from_id: message.from_id,
+        accepted: false,
+      };
+      this.ws.send(JSON.stringify(response));
+      return;
+    }
+
     const accepted = confirm(
       `User ${message.from_id} wants to connect. Accept?`,
     );
@@ -253,6 +273,8 @@ class AudioDecayClient {
       const { connectionState, audioManager } = this.initializeConnection(
         message.from_id,
       );
+      this.activeConnection = message.from_id; // Set active connection for receiving peer
+      this.updateUserList([...this.users.values()]); // Update UI immediately
 
       try {
         const onIceCandidate = (event) => {
@@ -294,6 +316,7 @@ class AudioDecayClient {
           "connect",
         );
       } catch (error) {
+        this.activeConnection = null; // Clear on error
         this.addLogEntry(`Connection error: ${error.message}`, "disconnect");
         this.cleanupConnection(message.from_id);
       }
@@ -323,12 +346,17 @@ class AudioDecayClient {
   }
 
   async requestConnection(userId) {
+    if (this.activeConnection) {
+      this.addLogEntry("You already have an active connection", "info");
+      return;
+    }
+
     try {
       this.addLogEntry(`Requesting connection to User ${userId}...`, "info");
-
-      // Initialize connection state first
       const { connectionState, audioManager } =
         this.initializeConnection(userId);
+      this.activeConnection = userId; // Set active connection immediately
+      this.updateUserList([...this.users.values()]); // Update UI right away
 
       // Check for secure context
       if (!window.isSecureContext) {
@@ -370,6 +398,7 @@ class AudioDecayClient {
       this.ws.send(JSON.stringify(offerMsg));
       this.addLogEntry(`Sent connection request to User ${userId}`, "connect");
     } catch (error) {
+      this.activeConnection = null; // Clear active connection on error
       this.addLogEntry(`Connection error: ${error.message}`, "disconnect");
       this.cleanupConnection(userId);
     }
@@ -379,6 +408,8 @@ class AudioDecayClient {
     const { connectionState, audioManager } = this.initializeConnection(
       message.from_id,
     );
+    this.activeConnection = message.from_id; // Set active connection for receiving peer
+    this.updateUserList([...this.users.values()]); // Update UI immediately
 
     try {
       const peerConnection = await audioManager.createPeerConnection(
@@ -394,6 +425,17 @@ class AudioDecayClient {
           }
         },
       );
+
+      // Add ontrack handler for receiving end
+      peerConnection.ontrack = async (event) => {
+        this.addLogEntry(
+          `Receiving audio from User ${message.from_id}`,
+          "connect",
+        );
+        const audio = new Audio();
+        audio.srcObject = event.streams[0];
+        this.setupAudioPlayback(audio, audioManager);
+      };
 
       // First set the remote description
       const offer = JSON.parse(message.offer);
@@ -414,11 +456,9 @@ class AudioDecayClient {
           answer: JSON.stringify(answer),
         }),
       );
-
-      // Update user list to reflect new connection
-      this.updateUserList([...this.users.values()]);
     } catch (error) {
       console.error("Failed to handle offer:", error);
+      this.activeConnection = null;
       this.cleanupConnection(message.from_id);
     }
   }
@@ -460,7 +500,7 @@ class AudioDecayClient {
     const playAudio = async () => {
       try {
         await audio.play();
-        audioManager.startAudioDecay();
+        audioManager.startAudioDecay(); // This triggers the UI update
       } catch (err) {
         console.error("Audio playback failed:", err);
         this.addLogEntry(`Error playing audio: ${err.message}`, "disconnect");
@@ -469,7 +509,7 @@ class AudioDecayClient {
           async () => {
             try {
               await audio.play();
-              audioManager.startAudioDecay();
+              audioManager.startAudioDecay(); // Also here for retry
             } catch (error) {
               console.error("Retry playback failed:", error);
             }
