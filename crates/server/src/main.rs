@@ -1,13 +1,13 @@
 use axum::{
     extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade},
-    http::{HeaderName, Method},
+    http::{HeaderName, HeaderValue, Method},
     response::Response,
     routing::get,
     Router,
 };
 use axum_server::Handle;
-use decay::config::Config;
-use decay::types::{Message, User};
+use decay_server::config::Config;
+use decay_server::types::{Message, User};
 use dotenv::dotenv;
 use env_logger::init;
 use futures_util::{sink::SinkExt, stream::StreamExt};
@@ -21,7 +21,11 @@ use std::{
     time::Duration,
 };
 use tokio::sync::{mpsc, RwLock};
-use tower_http::{cors::CorsLayer, services::ServeDir, trace::TraceLayer};
+use tower_http::{
+    cors::{Any, CorsLayer},
+    services::ServeDir,
+    trace::TraceLayer,
+};
 
 /// Our global unique user id counter.
 static NEXT_USER_ID: AtomicUsize = AtomicUsize::new(1);
@@ -106,18 +110,28 @@ async fn main() {
 }
 
 fn create_routes(users: Users) -> Router {
+    // Create CORS layer
     let cors = CorsLayer::new()
-        .allow_origin(tower_http::cors::Any)
+        .allow_origin(Any)
         .allow_methods([Method::GET, Method::POST])
-        .allow_headers([HeaderName::from_static("content-type")]);
+        .allow_headers([
+            HeaderName::from_static("content-type"),
+            HeaderName::from_static("x-requested-with"),
+        ]);
 
     Router::new()
         .route("/ws", get(ws_handler))
-        .nest_service("/static", ServeDir::new("www"))
+        // Serve static files
+        .nest_service(
+            "/static",
+            ServeDir::new("www/static").append_index_html_on_directories(false),
+        )
+        // Serve index.html
         .fallback_service(ServeDir::new("www").append_index_html_on_directories(true))
-        .with_state(users)
+        // Add middleware layers individually
         .layer(cors)
         .layer(TraceLayer::new_for_http())
+        .with_state(users)
 }
 
 async fn ws_handler(

@@ -1,3 +1,5 @@
+import { WasmAudioProcessor } from "./wasm-audio-processor.js";
+
 export class AudioStreamManager {
   constructor(connectionState) {
     this.stream = null;
@@ -15,6 +17,8 @@ export class AudioStreamManager {
     this.remoteAudio.playsInline = true; // Important for iOS
     this.audioContext = null;
     this.audioInitialized = false;
+    this.audioProcessor = new WasmAudioProcessor();
+    this.audioProcessor.initialize();
     this.setupStateHandlers(connectionState);
   }
 
@@ -136,20 +140,17 @@ export class AudioStreamManager {
     this.startTime = Date.now();
     this.bitrateControl.current = this.bitrateControl.max;
 
-    // Update bitrate every second
     this.updateInterval = setInterval(() => {
       const elapsedSeconds = (Date.now() - this.startTime) / 1000;
-      const decayFactor = Math.exp(-elapsedSeconds / 30); // 30-second decay constant
+      const decayFactor = Math.exp(-elapsedSeconds / 30);
+      const targetBitrate = this.bitrateControl.max * decayFactor * 1000; // Convert to bps
 
-      this.bitrateControl.current = Math.max(
-        this.bitrateControl.min,
-        this.bitrateControl.max * decayFactor,
-      );
-
+      // Use Wasm processor instead of JavaScript calculation
+      this.bitrateControl.current =
+        this.audioProcessor.adjustBitrate(targetBitrate) / 1000; // Convert back to kbps
       this.updateBitrate();
     }, 1000);
 
-    // Initial bitrate update
     this.updateBitrate();
   }
 
