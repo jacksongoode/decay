@@ -1,3 +1,5 @@
+pub mod types;
+
 use wasm_bindgen::prelude::*;
 
 // Initialize panic hook for better error messages
@@ -23,7 +25,6 @@ impl AudioProcessor {
     }
 
     pub fn process_audio(&mut self, input: &[f32]) -> Vec<f32> {
-        // Basic implementation - will expand this later
         input.to_vec()
     }
 }
