@@ -32,6 +32,11 @@ pub enum Message {
         to_id: usize,
         candidate: String,
     },
+    PeerStateChange {
+        from_id: usize,
+        to_id: usize,
+        connected: bool,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
