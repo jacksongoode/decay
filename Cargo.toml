@@ -1,48 +1,6 @@
-[package]
-name = "decay"
-version = "0.1.0"
-edition = "2021"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
-[lib]
-crate-type = ["cdylib", "rlib"]
-
-[dependencies]
-wasm-bindgen = "0.2"
-js-sys = "0.3"
-wasm-bindgen-futures = "0.4"
-console_error_panic_hook = "0.1"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-tokio = { version = "1.0", features = ["full"] }
-futures = "0.3"
-futures-util = "0.3"
-env_logger = "0.9"
-log = "0.4"
-dotenv = "0.15"
-axum = { version = "0.7", features = ["ws"] }
-axum-server = { version = "0.6", features = ["tls-rustls"] }
-tower = "0.4"
-tower-http = { version = "0.5", features = ["cors", "fs", "trace"] }
-
-[dependencies.web-sys]
-version = "0.3"
-features = [
-  "AudioContext",
-  "AudioNode",
-  "AudioBuffer",
-  "AudioBufferSourceNode",
-  "MediaStream",
-  "MediaStreamAudioSourceNode",
-  "MediaStreamConstraints",
-  "Navigator",
-  "Window",
-  "console",
-]
-
-[dev-dependencies]
-wasm-bindgen-test = "0.3"
+[workspace]
+members = ["crates/server", "crates/wasm"]
+resolver = "2"
 
 [profile.release]
 opt-level = 3

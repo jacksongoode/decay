@@ -1,5 +1,5 @@
-import { AudioStreamManager } from "./audio-stream.js";
-import { ConnectionState } from "./connection-state.js";
+import { AudioStreamManager } from "../../../www/js/static/audio-stream.js";
+import { ConnectionState } from "../../../www/js/static/connection-state.js";
 
 class AudioDecayClient {
   constructor() {

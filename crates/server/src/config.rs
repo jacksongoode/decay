@@ -10,8 +10,8 @@ pub struct Config {
     pub key_path: Option<String>,
 }
 
-impl Default for Config {
-    fn default() -> Self {
+impl Config {
+    pub fn default() -> Self {
         Self {
             host: env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string()),
             port: env::var("PORT")
