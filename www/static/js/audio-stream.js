@@ -6,7 +6,7 @@ export class AudioStreamManager {
     this.peerConnection = null;
     this.connectionState = connectionState;
     this.bitrateControl = {
-      min: 8, // 8 kbps minimum
+      min: 2, // 2 kbps minimum
       max: 128, // 128 kbps maximum
       current: 128,
     };
@@ -16,17 +16,20 @@ export class AudioStreamManager {
     this.remoteAudio.autoplay = true;
     this.remoteAudio.playsInline = true; // Important for iOS
     this.audioContext = null;
+    this.audioProcessor = null;
     this.audioInitialized = false;
-    this.audioProcessor = new WasmAudioProcessor();
-    this.audioProcessor.initialize();
+    this.isCleaningUp = false;
     this.setupStateHandlers(connectionState);
+    this.healthCheckInterval = null;
+    this.startHealthCheck();
+    this.isProcessingAudio = false;
   }
 
   setupStateHandlers(connectionState) {
     connectionState.on("connectionFailed", () => this.cleanup());
     connectionState.on("stateChange", ({ newState }) => {
-      if (newState === connectionState.states.CONNECTED) {
-        this.startAudioDecay();
+      if (newState === connectionState.states.FAILED) {
+        this.cleanup();
       }
     });
   }
@@ -35,12 +38,12 @@ export class AudioStreamManager {
     try {
       this.stream = await navigator.mediaDevices.getUserMedia({
         audio: {
-          // Set initial high-quality audio parameters
-          autoGainControl: false,
+          // Set specific audio parameters
+          autoGainControl: true,
           channelCount: 2,
           echoCancellation: false,
           noiseSuppression: false,
-          sampleRate: 48000,
+          sampleRate: 48000, // Explicitly request 48kHz
           sampleSize: 16,
         },
         video: false,
@@ -141,135 +144,133 @@ export class AudioStreamManager {
   }
 
   startAudioDecay() {
+    if (this.updateInterval) {
+      clearInterval(this.updateInterval);
+    }
+
     this.startTime = Date.now();
-    this.bitrateControl.current = this.bitrateControl.max;
+    this.isProcessingAudio = true;
 
     this.updateInterval = setInterval(() => {
-      const elapsedSeconds = (Date.now() - this.startTime) / 1000;
-      const decayFactor = Math.exp(-elapsedSeconds / 30);
-      const targetBitrate = this.bitrateControl.max * decayFactor * 1000; // Convert to bps
+      if (!this.isProcessingAudio) return;
 
-      // Use Wasm processor instead of JavaScript calculation
-      this.bitrateControl.current =
-        this.audioProcessor.adjustBitrate(targetBitrate) / 1000; // Convert back to kbps
-      this.updateBitrate();
-    }, 1000);
-
-    this.updateBitrate();
+      const elapsedTime = (Date.now() - this.startTime) / 1000;
+      this.updateBitrate(elapsedTime);
+    }, 500);
   }
 
-  async updateBitrate() {
-    const sender = this.peerConnection
-      ?.getSenders()
-      .find((s) => s.track?.kind === "audio");
+  updateBitrate(elapsedTime) {
+    if (!this.isProcessingAudio) return;
 
-    if (!sender) return;
+    // Much slower decay factor (closer to 1.0)
+    // Original was 0.92, new value makes decay take about 1 minute
+    const decayFactor = 0.99;
 
-    try {
-      const params = sender.getParameters();
-      if (!params.encodings) {
-        params.encodings = [{}];
-      }
+    // Calculate new bitrate using decay formula
+    this.bitrateControl.current = Math.max(
+      this.bitrateControl.min,
+      Math.min(
+        this.bitrateControl.max,
+        this.bitrateControl.current * decayFactor,
+      ),
+    );
 
-      // Set both maxBitrate and priority
-      params.encodings[0].maxBitrate = this.bitrateControl.current * 1000;
-      params.encodings[0].priority = "high";
+    // Alternative linear decay approach:
+    // const totalDecayTime = 60; // 60 seconds
+    // const decayRate = (this.bitrateControl.max - this.bitrateControl.min) / totalDecayTime;
+    // this.bitrateControl.current = Math.max(
+    //   this.bitrateControl.min,
+    //   this.bitrateControl.max - (decayRate * elapsedTime)
+    // );
 
-      // Add stereo and maxaveragebitrate to SDP
-      const transceiver = this.peerConnection
-        .getTransceivers()
-        .find((t) => t.sender === sender);
-
-      if (transceiver) {
-        const sendCodecs = RTCRtpSender.getCapabilities("audio").codecs;
-        const opusCodec = sendCodecs.find((c) => c.mimeType === "audio/opus");
-        if (opusCodec) {
-          transceiver.setCodecPreferences([opusCodec]);
-        }
-      }
-
-      await sender.setParameters(params);
-
-      this.connectionState.updateState({
-        currentBitrate: this.bitrateControl.current,
-        elapsedTime: Math.floor((Date.now() - this.startTime) / 1000),
+    // Update connection state with new stats
+    if (this.connectionState) {
+      this.connectionState.updateStats({
+        bitrate: this.bitrateControl.current,
+        elapsedTime: elapsedTime,
       });
-    } catch (error) {
-      console.warn("Failed to update bitrate:", error);
     }
   }
 
   async initializeAudio() {
     if (this.audioInitialized) return;
 
-    // Create AudioContext on user gesture
-    this.audioContext = new (window.AudioContext ||
-      window.webkitAudioContext)();
+    try {
+      // Create a default AudioContext without specifying sample rate
+      this.audioContext = new (window.AudioContext ||
+        window.webkitAudioContext)();
 
-    // Resume audio context (needed for mobile)
-    if (this.audioContext.state === "suspended") {
-      await this.audioContext.resume();
+      console.log(
+        `System audio context created with sample rate: ${this.audioContext.sampleRate}`,
+      );
+
+      // Create the processor with the same context
+      if (!this.audioProcessor) {
+        this.audioProcessor = new WasmAudioProcessor();
+        this.audioProcessor.setAudioContext(this.audioContext);
+      }
+
+      this.audioInitialized = true;
+      return this.audioContext;
+    } catch (error) {
+      console.error("Failed to initialize audio:", error);
+      throw error;
     }
-
-    this.audioInitialized = true;
   }
 
-  setupRemoteTrack(track, stream) {
-    console.log("Setting up remote track:", track.kind);
+  async setupRemoteTrack(track, stream) {
+    if (track.kind !== "audio") return;
 
-    if (track.kind === "audio") {
-      this.remoteAudio.srcObject = stream;
+    try {
+      await this.initializeAudio();
+      await this.audioProcessor.setupAudioProcessing(stream);
 
-      const playAudio = async () => {
-        try {
-          await this.initializeAudio();
-          await this.remoteAudio.play();
-        } catch (err) {
-          console.error("Audio playback failed:", err);
+      console.log("Remote track setup complete");
+    } catch (err) {
+      console.error("Audio setup failed:", err);
+      await this.cleanup();
+      throw err;
+    }
+  }
 
-          // Handle mobile autoplay restriction
-          const resumeAudio = async () => {
-            try {
-              await this.initializeAudio();
-              await this.remoteAudio.play();
-              document.removeEventListener("touchstart", resumeAudio);
-              document.removeEventListener("click", resumeAudio);
-            } catch (error) {
-              console.error("Retry playback failed:", error);
-            }
-          };
+  startHealthCheck() {
+    this.healthCheckInterval = setInterval(() => {
+      if (!this.peerConnection || !this.isProcessingAudio) return;
 
-          document.addEventListener("touchstart", resumeAudio, { once: true });
-          document.addEventListener("click", resumeAudio, { once: true });
+      this.peerConnection.getStats().then((stats) => {
+        let hasActiveAudio = false;
+        stats.forEach((report) => {
+          if (report.type === "inbound-rtp" && report.kind === "audio") {
+            hasActiveAudio = report.packetsReceived > 0;
+          }
+        });
+
+        if (this.isProcessingAudio && !hasActiveAudio) {
+          console.warn("No audio packets detected");
+          this.cleanup();
+          this.connectionState?.setState(this.connectionState.states.FAILED);
         }
-      };
-
-      playAudio();
-    }
+      });
+    }, 2000);
   }
 
-  cleanup() {
-    if (this.updateInterval) {
-      clearInterval(this.updateInterval);
-      this.updateInterval = null;
-    }
+  async cleanup() {
+    if (this.isCleaningUp) return;
+    this.isCleaningUp = true;
 
-    if (this.stream) {
-      this.stream.getTracks().forEach((track) => track.stop());
-      this.stream = null;
+    try {
+      if (this.audioProcessor) {
+        await this.audioProcessor.cleanup();
+      }
+      if (this.audioContext?.state !== "closed") {
+        await this.audioContext?.close();
+      }
+    } catch (e) {
+      console.warn("Cleanup error:", e);
+    } finally {
+      this.audioContext = null;
+      this.audioInitialized = false;
+      this.isCleaningUp = false;
     }
-
-    if (this.peerConnection) {
-      this.peerConnection.close();
-      this.peerConnection = null;
-    }
-
-    // Only set state if connectionState exists and hasn't been cleaned up
-    if (this.connectionState?.container) {
-      this.connectionState.setState(this.connectionState.states.DISCONNECTED);
-    }
-
-    this.startTime = null;
-    console.log("AudioStreamManager cleaned up");
   }
 }

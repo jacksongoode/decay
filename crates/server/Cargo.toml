@@ -21,6 +21,6 @@ dotenv = "0.15"
 axum = { version = "0.7", features = ["ws"] }
 axum-server = { version = "0.6", features = ["tls-rustls"] }
 tower = "0.4"
-tower-http = { version = "0.5", features = ["cors", "fs", "trace"] }
+tower-http = { version = "0.5", features = ["cors", "trace", "set-header", "fs"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

@@ -1,5 +1,6 @@
 use axum::{
     extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade},
+    extract::State,
     http::{HeaderName, HeaderValue, Method},
     response::Response,
     routing::get,
@@ -11,6 +12,7 @@ use decay_server::types::{Message, User};
 use dotenv::dotenv;
 use env_logger::init;
 use futures_util::{sink::SinkExt, stream::StreamExt};
+use std::collections::HashSet;
 use std::{
     collections::HashMap,
     net::SocketAddr,
@@ -24,6 +26,7 @@ use tokio::sync::{mpsc, RwLock};
 use tower_http::{
     cors::{Any, CorsLayer},
     services::ServeDir,
+    set_header::SetResponseHeaderLayer,
     trace::TraceLayer,
 };
 
@@ -121,23 +124,25 @@ fn create_routes(users: Users) -> Router {
 
     Router::new()
         .route("/ws", get(ws_handler))
-        // Serve static files
         .nest_service(
             "/static",
             ServeDir::new("www/static").append_index_html_on_directories(false),
         )
-        // Serve index.html
         .fallback_service(ServeDir::new("www").append_index_html_on_directories(true))
-        // Add middleware layers individually
         .layer(cors)
+        .layer(SetResponseHeaderLayer::if_not_present(
+            HeaderName::from_static("cross-origin-opener-policy"),
+            HeaderValue::from_static("same-origin"),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            HeaderName::from_static("cross-origin-embedder-policy"),
+            HeaderValue::from_static("require-corp"),
+        ))
         .layer(TraceLayer::new_for_http())
         .with_state(users)
 }
 
-async fn ws_handler(
-    ws: WebSocketUpgrade,
-    axum::extract::State(users): axum::extract::State<Users>,
-) -> Response {
+async fn ws_handler(ws: WebSocketUpgrade, State(users): State<Users>) -> Response {
     ws.on_upgrade(|socket| handle_connection(socket, users))
 }
 
@@ -150,6 +155,7 @@ async fn handle_connection(ws: WebSocket, users: Users) {
     let connection_state = ConnectionState {
         last_activity: std::time::Instant::now(),
         tx: tx.clone(),
+        connections: HashSet::new(),
     };
 
     // Store the connection state
@@ -227,11 +233,35 @@ async fn handle_connection(ws: WebSocket, users: Users) {
             WsMessage::Text(text) => {
                 if let Ok(message) = serde_json::from_str::<Message>(&text) {
                     match &message {
-                        // Handle broadcast messages
-                        Message::PeerStateChange { .. } => {
-                            let users_lock = users_clone.read().await;
-                            for state in users_lock.values() {
-                                let _ = state.tx.send(Ok(WsMessage::Text(text.clone())));
+                        Message::PeerStateChange {
+                            from_id,
+                            to_id,
+                            state,
+                        } => {
+                            // Handle peer state changes
+                            if let Some(target_state) = users.read().await.get(to_id) {
+                                let _ = target_state.tx.send(Ok(WsMessage::Text(text.clone())));
+                            }
+
+                            // Update connection state based on the state string
+                            match state.as_str() {
+                                "disconnected" => {
+                                    if let Some(from_state) = users.write().await.get_mut(from_id) {
+                                        from_state.connections.remove(to_id);
+                                    }
+                                    if let Some(to_state) = users.write().await.get_mut(to_id) {
+                                        to_state.connections.remove(from_id);
+                                    }
+                                }
+                                "connected" => {
+                                    if let Some(from_state) = users.write().await.get_mut(from_id) {
+                                        from_state.connections.insert(*to_id);
+                                    }
+                                    if let Some(to_state) = users.write().await.get_mut(to_id) {
+                                        to_state.connections.insert(*from_id);
+                                    }
+                                }
+                                _ => {} // Handle other states if needed
                             }
                         }
                         // Handle targeted messages
@@ -262,7 +292,25 @@ async fn handle_connection(ws: WebSocket, users: Users) {
                     state.last_activity = std::time::Instant::now();
                 }
             }
-            WsMessage::Close(_) => break,
+            WsMessage::Close(_) => {
+                // Notify all connected peers about disconnection
+                let users_lock = users.read().await;
+                if let Some(state) = users_lock.get(&my_id) {
+                    for &peer_id in &state.connections {
+                        if let Some(peer_state) = users_lock.get(&peer_id) {
+                            let disconnect_msg = Message::PeerStateChange {
+                                from_id: my_id,
+                                to_id: peer_id,
+                                state: "disconnected".to_string(),
+                            };
+                            let _ = peer_state.tx.send(Ok(WsMessage::Text(
+                                serde_json::to_string(&disconnect_msg).unwrap(),
+                            )));
+                        }
+                    }
+                }
+                break;
+            }
             _ => {} // Handle other message types if needed
         }
     }
@@ -296,4 +344,15 @@ async fn broadcast_user_list(users: &Users) {
 struct ConnectionState {
     last_activity: std::time::Instant,
     tx: mpsc::UnboundedSender<Result<WsMessage, axum::Error>>,
+    connections: HashSet<usize>,
+}
+
+impl Default for ConnectionState {
+    fn default() -> Self {
+        Self {
+            last_activity: std::time::Instant::now(),
+            tx: mpsc::unbounded_channel().0,
+            connections: HashSet::new(),
+        }
+    }
 }

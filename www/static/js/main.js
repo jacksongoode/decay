@@ -18,8 +18,17 @@ class AudioDecayClient {
   }
 
   initializeConnection(peerId) {
-    const container = document.getElementById("connections-container");
-    const connectionState = new ConnectionState(peerId, container);
+    // Find or create the user's list item container
+    const userItem = document.querySelector(
+      `#users li[data-user-id="${peerId}"]`,
+    );
+    if (!userItem) {
+      console.error("User list item not found");
+      return null;
+    }
+
+    // Create connection state and audio manager
+    const connectionState = new ConnectionState(userItem);
     this.connections.set(peerId, connectionState);
 
     const audioManager = new AudioStreamManager(connectionState);
@@ -33,23 +42,43 @@ class AudioDecayClient {
     return { connectionState, audioManager };
   }
 
-  cleanupConnection(peerId) {
-    // Clean up audio manager before connection state
+  async cleanupConnection(peerId) {
+    // Prevent recursive cleanup
+    if (!this.connections.has(peerId) && !this.audioManagers.has(peerId)) {
+      return;
+    }
+
+    console.log(`Starting cleanup for peer: ${peerId}`);
+
+    // Clean up audio manager first
     const audioManager = this.audioManagers.get(peerId);
     if (audioManager) {
-      audioManager.cleanup();
-      this.audioManagers.delete(peerId);
+      try {
+        if (typeof audioManager.cleanup === "function") {
+          await audioManager.cleanup();
+        }
+      } catch (err) {
+        console.warn("Audio manager cleanup error:", err);
+      } finally {
+        this.audioManagers.delete(peerId);
+      }
     }
 
     // Clean up connection state last
     const connection = this.connections.get(peerId);
     if (connection) {
-      connection.cleanup();
-      this.connections.delete(peerId);
+      try {
+        connection.cleanup();
+      } finally {
+        this.connections.delete(peerId);
+      }
     }
 
-    this.activeConnection = null;
-    this.updateUserList([...this.users.values()]);
+    // Reset active connection only if it matches
+    if (this.activeConnection === peerId) {
+      this.activeConnection = null;
+      this.updateUserList([...this.users.values()]);
+    }
   }
 
   addLogEntry(message, type = "info") {
@@ -63,87 +92,57 @@ class AudioDecayClient {
   }
 
   updateUserList(users) {
-    const userList = document.getElementById("users");
-    userList.innerHTML = "";
+    const usersList = document.getElementById("users");
+    usersList.innerHTML = "";
 
-    // Make sure we're included in the users list
-    if (!users.some((u) => u.id === this.userId)) {
-      users.push({
-        id: this.userId,
-        name: `User ${this.userId}`,
-      });
-    }
-
-    // Update users map
+    // Update users map first
     this.users = new Map(users.map((user) => [user.id, user]));
 
     users.forEach((user) => {
       const li = document.createElement("li");
-      li.className = "user-item";
+      const isConnecting = this.activeConnection === user.id;
       const isConnected = this.isPeerConnected(user.id);
-      if (isConnected) {
-        li.classList.add("connected");
-      }
 
-      const userRow = document.createElement("div");
-      userRow.className = "user-row";
+      li.className = `user-item${isConnected ? " connected" : ""}${isConnecting ? " connecting" : ""}`;
+      li.setAttribute("data-user-id", user.id);
 
-      const userIdentity = document.createElement("div");
-      userIdentity.className = "user-identity";
+      li.innerHTML = `
+        <div class="user-row">
+          <div class="user-identity">
+            <div class="status-indicator${isConnected ? " connected" : ""}${isConnecting ? " connecting" : ""}"></div>
+            <span>User ${user.id}${user.id === this.userId ? " (You)" : ""}</span>
+          </div>
+          ${
+            user.id !== this.userId
+              ? `<button class="${isConnected ? "connected" : ""}" ${isConnecting && !isConnected ? "disabled" : ""}>
+            ${isConnected ? "Disconnect" : isConnecting ? "Connecting..." : "Connect"}
+          </button>`
+              : ""
+          }
+        </div>
+      `;
 
-      const statusDot = document.createElement("span");
-      statusDot.className = "status-indicator";
-      if (isConnected) {
-        statusDot.classList.add("connected");
-      }
-
-      const userName = document.createElement("span");
-      const isMe = user.id === this.userId;
-      userName.textContent = `User ${user.id} ${isMe ? "(You)" : ""}`;
-
-      userIdentity.appendChild(statusDot);
-      userIdentity.appendChild(userName);
-      userRow.appendChild(userIdentity);
-
-      // Only show connect/disconnect button for other users
-      if (!isMe) {
-        const connectBtn = document.createElement("button");
-        connectBtn.disabled = this.activeConnection && !isConnected;
-
-        if (isConnected) {
-          connectBtn.textContent = "Disconnect";
-          connectBtn.classList.add("connected");
-        } else {
-          connectBtn.textContent = "Connect";
+      // Add connection state container if connected or connecting
+      if (isConnected || isConnecting) {
+        const connection = this.connections.get(user.id);
+        if (connection?.container) {
+          li.appendChild(connection.container);
         }
+      }
 
-        connectBtn.onclick = () => {
+      // Add click handler for connect/disconnect button
+      if (user.id !== this.userId) {
+        const button = li.querySelector("button");
+        button.onclick = () => {
           if (isConnected) {
             this.disconnectFromPeer(user.id);
-          } else {
+          } else if (!isConnecting) {
             this.requestConnection(user.id);
           }
         };
-        userRow.appendChild(connectBtn);
       }
 
-      li.appendChild(userRow);
-
-      // Add connection state if it exists
-      const connection = this.connections.get(user.id);
-      if (connection) {
-        // Create container if it doesn't exist
-        if (!connection.container) {
-          connection.container = connection.createContainer();
-        }
-        // Add the connection's container directly
-        const statsContainer = document.createElement("div");
-        statsContainer.className = "stream-stats";
-        statsContainer.appendChild(connection.container);
-        li.appendChild(statsContainer);
-      }
-
-      userList.appendChild(li);
+      usersList.appendChild(li);
     });
   }
 
@@ -151,18 +150,37 @@ class AudioDecayClient {
     return this.activeConnection === peerId;
   }
 
-  disconnectFromPeer(peerId) {
-    const stateMsg = {
-      type: "PeerStateChange",
-      from_id: this.userId,
-      to_id: peerId,
-      connected: false,
-    };
-    this.ws.send(JSON.stringify(stateMsg));
+  async disconnectFromPeer(peerId) {
+    try {
+      const stateMsg = {
+        type: "PeerStateChange",
+        from_id: this.userId,
+        to_id: peerId,
+        state: "disconnected",
+      };
 
-    this.cleanupConnection(peerId);
-    this.activeConnection = null;
-    this.updateUserList([...this.users.values()]);
+      // Send disconnect message first
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        this.ws.send(JSON.stringify(stateMsg));
+      }
+
+      // Reset active connection
+      if (this.activeConnection === peerId) {
+        this.activeConnection = null;
+      }
+
+      // Perform cleanup
+      await this.cleanupConnection(peerId);
+      this.addLogEntry(`Disconnected from User ${peerId}`, "disconnect");
+
+      // Update UI immediately
+      this.updateUserList([...this.users.values()]);
+    } catch (error) {
+      console.error("Error during disconnect:", error);
+      // Attempt cleanup anyway
+      await this.cleanupConnection(peerId);
+      this.updateUserList([...this.users.values()]);
+    }
   }
 
   connect() {
@@ -236,15 +254,20 @@ class AudioDecayClient {
         break;
       case "PeerStateChange":
         this.addLogEntry(
-          `User ${message.from_id} ${message.connected ? "connected to" : "disconnected from"} User ${message.to_id}`,
-          message.connected ? "connect" : "disconnect",
+          `User ${message.from_id} ${message.state === "connected" ? "connected to" : "disconnected from"} User ${message.to_id}`,
+          message.state === "connected" ? "connect" : "disconnect",
         );
 
         if (message.from_id === this.userId || message.to_id === this.userId) {
           const peerId =
             message.from_id === this.userId ? message.to_id : message.from_id;
+          const connection = this.connections.get(peerId);
 
-          if (!message.connected) {
+          if (message.state === "connected") {
+            if (connection) {
+              connection.setState(connection.states.CONNECTED);
+            }
+          } else {
             this.cleanupConnection(peerId);
           }
 
@@ -345,62 +368,53 @@ class AudioDecayClient {
     }
   }
 
-  async requestConnection(userId) {
-    if (this.activeConnection) {
-      this.addLogEntry("You already have an active connection", "info");
-      return;
-    }
+  async requestConnection(peerId) {
+    if (this.activeConnection === peerId) return;
 
     try {
-      this.addLogEntry(`Requesting connection to User ${userId}...`, "info");
-      const { connectionState, audioManager } =
-        this.initializeConnection(userId);
-      this.activeConnection = userId; // Set active connection immediately
-      this.updateUserList([...this.users.values()]); // Update UI right away
+      // The initializeConnection returns an object with both connectionState and audioManager
+      const result = this.initializeConnection(peerId);
+      if (!result) return; // Early return if initialization fails
 
-      // Check for secure context
-      if (!window.isSecureContext) {
-        throw new Error(
-          "Media devices require a secure context (HTTPS or localhost)",
-        );
-      }
+      const { connectionState, audioManager } = result;
 
-      const peerConnection = await audioManager.createPeerConnection(
-        (event) => {
-          if (event.candidate) {
-            const candidateMsg = {
+      // Track connection attempt
+      this.activeConnection = peerId;
+      connectionState.setState(connectionState.states.CONNECTING);
+
+      // Create peer connection first
+      await audioManager.createPeerConnection((event) => {
+        if (event.candidate) {
+          this.ws.send(
+            JSON.stringify({
               type: "RTCCandidate",
               from_id: this.userId,
-              to_id: userId,
+              to_id: peerId,
               candidate: JSON.stringify(event.candidate),
-            };
-            this.ws.send(JSON.stringify(candidateMsg));
-          }
-        },
+            }),
+          );
+        }
+      });
+
+      // Now create and set offer
+      const offer = await audioManager.peerConnection.createOffer();
+      await audioManager.peerConnection.setLocalDescription(offer);
+
+      this.ws.send(
+        JSON.stringify({
+          type: "RTCOffer",
+          from_id: this.userId,
+          to_id: peerId,
+          offer: JSON.stringify(offer),
+        }),
       );
 
-      // Add ontrack handler for the initiating side
-      peerConnection.ontrack = async (event) => {
-        this.addLogEntry(`Receiving audio from User ${userId}`, "connect");
-        const audio = new Audio();
-        audio.srcObject = event.streams[0];
-        this.setupAudioPlayback(audio, audioManager);
-      };
-      const offer = await peerConnection.createOffer();
-      await peerConnection.setLocalDescription(offer);
-
-      const offerMsg = {
-        type: "RTCOffer",
-        from_id: this.userId,
-        to_id: userId,
-        offer: JSON.stringify(offer),
-      };
-      this.ws.send(JSON.stringify(offerMsg));
-      this.addLogEntry(`Sent connection request to User ${userId}`, "connect");
+      this.updateUserList([...this.users.values()]);
     } catch (error) {
-      this.activeConnection = null; // Clear active connection on error
-      this.addLogEntry(`Connection error: ${error.message}`, "disconnect");
-      this.cleanupConnection(userId);
+      console.error("Connection request failed:", error);
+      this.activeConnection = null;
+      await this.cleanupConnection(peerId);
+      throw error; // Propagate error for proper handling
     }
   }
 
@@ -408,8 +422,11 @@ class AudioDecayClient {
     const { connectionState, audioManager } = this.initializeConnection(
       message.from_id,
     );
-    this.activeConnection = message.from_id; // Set active connection for receiving peer
-    this.updateUserList([...this.users.values()]); // Update UI immediately
+
+    // Set active connection and update UI immediately
+    this.activeConnection = message.from_id;
+    connectionState.setState(connectionState.states.CONNECTING);
+    this.updateUserList([...this.users.values()]);
 
     try {
       const peerConnection = await audioManager.createPeerConnection(
@@ -434,7 +451,7 @@ class AudioDecayClient {
         );
         const audio = new Audio();
         audio.srcObject = event.streams[0];
-        this.setupAudioPlayback(audio, audioManager);
+        await this.setupAudioPlayback(audio, audioManager);
       };
 
       // First set the remote description
@@ -447,7 +464,7 @@ class AudioDecayClient {
       const answer = await peerConnection.createAnswer();
       await peerConnection.setLocalDescription(answer);
 
-      // Send answer immediately without waiting for ICE gathering
+      // Send answer
       this.ws.send(
         JSON.stringify({
           type: "RTCAnswer",
@@ -456,38 +473,123 @@ class AudioDecayClient {
           answer: JSON.stringify(answer),
         }),
       );
+
+      // Wait for ICE gathering to complete
+      if (peerConnection.iceGatheringState !== "complete") {
+        await new Promise((resolve) => {
+          peerConnection.addEventListener("icegatheringstatechange", () => {
+            if (peerConnection.iceGatheringState === "complete") {
+              resolve();
+            }
+          });
+        });
+      }
+
+      // Update state after successful connection
+      connectionState.setState(connectionState.states.CONNECTED);
     } catch (error) {
       console.error("Failed to handle offer:", error);
       this.activeConnection = null;
+      connectionState.setState(connectionState.states.FAILED);
       this.cleanupConnection(message.from_id);
     }
   }
 
   async handleRTCAnswer(message) {
     const audioManager = this.audioManagers.get(message.from_id);
-    if (audioManager?.peerConnection) {
-      try {
-        const answer = JSON.parse(message.answer);
+    const connectionState = this.connections.get(message.from_id);
+
+    // More comprehensive state checking
+    if (!audioManager?.peerConnection || !connectionState) {
+      console.warn("Invalid connection state for answer");
+      await this.cleanupConnection(message.from_id);
+      return;
+    }
+
+    try {
+      const answer = JSON.parse(message.answer);
+      const signalingState = audioManager.peerConnection.signalingState;
+
+      // Enhanced state validation
+      if (signalingState === "have-local-offer") {
         await audioManager.peerConnection.setRemoteDescription(
           new RTCSessionDescription(answer),
         );
-      } catch (error) {
-        console.error("Failed to handle answer:", error);
-        this.cleanupConnection(message.from_id);
+
+        // Wait for connection to stabilize
+        await new Promise((resolve, reject) => {
+          const timeout = setTimeout(
+            () => reject(new Error("Connection timeout")),
+            5000,
+          );
+
+          const checkState = () => {
+            if (audioManager.peerConnection.connectionState === "connected") {
+              clearTimeout(timeout);
+              resolve();
+            } else if (
+              audioManager.peerConnection.connectionState === "failed"
+            ) {
+              clearTimeout(timeout);
+              reject(new Error("Connection failed"));
+            }
+          };
+
+          audioManager.peerConnection.addEventListener(
+            "connectionstatechange",
+            checkState,
+          );
+          checkState(); // Check immediately in case we're already connected
+        });
+
+        connectionState.setState(connectionState.states.CONNECTED);
+      } else {
+        throw new Error(`Invalid signaling state: ${signalingState}`);
+      }
+    } catch (error) {
+      console.error("Failed to handle answer:", error);
+
+      // Enhanced error handling with retries
+      if (this.activeConnection === message.from_id) {
+        const maxRetries = 3;
+        let retryCount = 0;
+
+        const retry = async () => {
+          if (retryCount >= maxRetries) {
+            await this.cleanupConnection(message.from_id);
+            return;
+          }
+
+          try {
+            retryCount++;
+            await this.cleanupConnection(message.from_id);
+            await new Promise((resolve) =>
+              setTimeout(resolve, 1000 * retryCount),
+            );
+            await this.requestConnection(message.from_id);
+          } catch (retryError) {
+            console.error(`Retry ${retryCount} failed:`, retryError);
+            await retry();
+          }
+        };
+
+        await retry();
+      } else {
+        await this.cleanupConnection(message.from_id);
       }
     }
   }
 
   async handleRTCCandidate(message) {
     const audioManager = this.audioManagers.get(message.from_id);
-    if (audioManager?.peerConnection) {
+    if (audioManager?.peerConnection?.connectionState !== "failed") {
       try {
         const candidate = JSON.parse(message.candidate);
-        await audioManager.peerConnection.addIceCandidate(
-          new RTCIceCandidate(candidate),
-        );
+        await audioManager?.peerConnection
+          ?.addIceCandidate(new RTCIceCandidate(candidate))
+          .catch(() => {}); // Ignore ICE candidate errors
       } catch (error) {
-        console.error("Failed to add ICE candidate:", error);
+        console.warn("ICE candidate handling failed:", error);
       }
     }
   }
@@ -525,7 +627,59 @@ class AudioDecayClient {
   onConnectionStateChange(peerId, state) {
     if (state === "connected") {
       this.updateUserList([...this.users.values()]);
+    } else if (state === "failed" || state === "disconnected") {
+      this.handleConnectionFailure(peerId);
     }
+  }
+
+  async handleConnectionFailure(peerId) {
+    console.log("Handling connection failure for peer:", peerId);
+
+    const maxRetries = 3;
+    const baseDelay = 1000; // 1 second base delay
+
+    const cleanup = async () => {
+      if (this.audioManagers.has(peerId)) {
+        const audioManager = this.audioManagers.get(peerId);
+        await audioManager?.cleanup().catch(console.warn);
+        this.audioManagers.delete(peerId);
+      }
+
+      if (this.connections.has(peerId)) {
+        await this.cleanupConnection(peerId);
+      }
+    };
+
+    // Use exponential backoff with Promise
+    const attemptReconnection = async (attempt = 0) => {
+      if (attempt >= maxRetries) {
+        this.addLogEntry(
+          `Connection failed after ${maxRetries} attempts`,
+          "disconnect",
+        );
+        await cleanup();
+        return;
+      }
+
+      const delay = baseDelay * Math.pow(2, attempt);
+
+      try {
+        await cleanup();
+
+        // Only attempt reconnection if this is still the active connection
+        if (this.activeConnection === peerId) {
+          await new Promise((resolve) => setTimeout(resolve, delay));
+          await this.requestConnection(peerId);
+        }
+      } catch (error) {
+        console.error(`Reconnection attempt ${attempt + 1} failed:`, error);
+        // Recursively try next attempt
+        await attemptReconnection(attempt + 1);
+      }
+    };
+
+    // Start the reconnection process
+    await attemptReconnection();
   }
 }
 

@@ -15,7 +15,8 @@
             padding: 0 1rem;
             color: #1f2937;
             line-height: 1.5;
-            font-size: 0.875rem; /* 14px base font size */
+            font-size: 0.875rem;
+            /* 14px base font size */
         }
 
         /* Common container styles */
@@ -30,7 +31,8 @@
         /* Headings */
         h2 {
             margin: 0 0 1rem;
-            font-size: 1rem; /* 16px for headings */
+            font-size: 1rem;
+            /* 16px for headings */
             font-weight: 600;
             color: #111827;
         }
@@ -48,11 +50,7 @@
             margin: 0.5rem 0;
             padding: 0.75rem 1rem;
             box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
-            transition: padding 150ms ease;
-        }
-
-        .user-item.connected {
-            padding-bottom: 1rem;
+            transition: all 150ms ease;
         }
 
         .user-info {
@@ -79,7 +77,8 @@
             height: 9.375rem;
             overflow-y: auto;
             font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-            font-size: 0.75rem; /* 12px for monospace log */
+            font-size: 0.75rem;
+            /* 12px for monospace log */
             background: white;
             padding: 0.75rem;
             border-radius: 0.375rem;
@@ -131,6 +130,7 @@
 
         button.connected:hover:not(:disabled) {
             background: #b91c1c;
+            cursor: pointer;
         }
 
         /* Status indicators */
@@ -140,36 +140,64 @@
             border-radius: 50%;
             background: #9ca3af;
             margin-right: 0.5rem;
-            flex-shrink: 0;
+            transition: background-color 150ms ease;
         }
 
         .status-indicator.connected {
             background: #22c55e;
         }
 
+        .status-indicator.connecting {
+            background: #fbbf24;
+            animation: pulse 1.5s infinite;
+        }
+
+        @keyframes pulse {
+            0% {
+                opacity: 1;
+            }
+
+            50% {
+                opacity: 0.5;
+            }
+
+            100% {
+                opacity: 1;
+            }
+        }
+
+        .user-item.connecting button {
+            opacity: 0.7;
+            cursor: not-allowed;
+        }
+
+        button[disabled] {
+            opacity: 0.7;
+            cursor: not-allowed;
+        }
+
         /* Stream stats */
         .stream-stats {
             overflow: hidden;
-            max-height: 0;
-            opacity: 0;
-            margin-top: 0;
-            padding-top: 0;
-            border-top: 1px solid transparent;
             transition: all 150ms ease;
+            background: #f3f4f6;
+            border-radius: 0.375rem;
+            margin: 0.75rem 0;
+            padding: 0.75rem;
+            border: 1px solid #e5e7eb;
         }
 
-        .user-item.connected .stream-stats {
-            max-height: 200px;
-            opacity: 1;
-            margin-top: 0.75rem;
-            padding-top: 0.75rem;
-            border-top-color: #e5e7eb;
-        }
-
-        .stream-stats > div {
+        .stream-stats>div {
             margin: 0.25rem 0;
             color: #4b5563;
-            font-size: 0.75rem; /* 12px for stats */
+            font-size: 0.75rem;
+            display: flex;
+            justify-content: space-between;
+        }
+
+        .stream-stats .status {
+            font-weight: 500;
+            color: #111827;
         }
 
         /* Loading animation */
@@ -200,7 +228,7 @@
             animation: dots 1s steps(5, end) infinite;
         }
     </style>
-    <link rel="icon" type="image/x-icon" href="/static/favicon.ico">
+    <link rel="icon" type="image/x-icon" href="/favicon.ico">
 </head>
 
 <body>
@@ -214,6 +242,18 @@
         <h2>Connection Log</h2>
         <div id="connection-log"></div>
     </div>
+
+    <script>
+        // Add this before your main.js
+        fetch('/static/js/audio-decay-worklet.js')
+            .then(response => {
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                console.log('AudioWorklet file is accessible');
+                return response.text();
+            })
+            .then(text => console.log('AudioWorklet content length:', text.length))
+            .catch(err => console.error('AudioWorklet file error:', err));
+    </script>
 
     <script type="module" src="/static/js/main.js"></script>
 </body>

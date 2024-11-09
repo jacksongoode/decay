@@ -35,7 +35,7 @@ pub enum Message {
     PeerStateChange {
         from_id: usize,
         to_id: usize,
-        connected: bool,
+        state: String,
     },
 }
 
