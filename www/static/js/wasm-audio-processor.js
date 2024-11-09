@@ -38,6 +38,21 @@ export class WasmAudioProcessor {
       this.sourceNode.connect(this.workletNode);
       this.workletNode.connect(this.audioContext.destination);
 
+      // Add a gain node for volume control (optional)
+      this.gainNode = this.audioContext.createGain();
+      this.gainNode.gain.value = 1.0; // Full volume
+
+      // Connect through gain node
+      this.workletNode.disconnect(); // Disconnect previous
+      this.sourceNode.connect(this.workletNode);
+      this.workletNode.connect(this.gainNode);
+      this.gainNode.connect(this.audioContext.destination);
+
+      // Resume the audio context if it's suspended
+      if (this.audioContext.state === "suspended") {
+        await this.audioContext.resume();
+      }
+
       console.log("Audio processing setup complete");
     } catch (error) {
       console.error("Audio processing setup failed:", error);
@@ -226,6 +241,10 @@ export class WasmAudioProcessor {
 
     this._cleanupPromise = (async () => {
       try {
+        if (this.gainNode) {
+          this.gainNode.disconnect();
+          this.gainNode = null;
+        }
         // Cancel any pending initialization
         this.wasmInitPromise = null;
 

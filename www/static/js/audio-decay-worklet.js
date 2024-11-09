@@ -48,6 +48,16 @@ class AudioDecayProcessor extends AudioWorkletProcessor {
         return true;
       }
 
+      // Debug: Check if we're receiving audio data
+      const hasAudioData = input.some((channel) =>
+        channel.some((sample) => sample !== 0),
+      );
+
+      if (hasAudioData && !this.hasLoggedAudio) {
+        console.log("Receiving audio data in worklet");
+        this.hasLoggedAudio = true;
+      }
+
       // Process each channel
       for (let channel = 0; channel < input.length; channel++) {
         // Create views into the shared memory
@@ -73,15 +83,18 @@ class AudioDecayProcessor extends AudioWorkletProcessor {
 
         // Copy processed data back to output
         output[channel].set(outputBuffer);
+
+        // Debug: Verify output data
+        const hasOutput = output[channel].some((sample) => sample !== 0);
+        if (hasOutput && !this.hasLoggedOutput) {
+          console.log("Generating output audio data");
+          this.hasLoggedOutput = true;
+        }
       }
 
       return true;
     } catch (error) {
-      console.error("Error in audio processing:", error, {
-        hasMemoryBuffer: !!this.wasmMemoryBuffer,
-        inputPtr: this.inputPtr,
-        outputPtr: this.outputPtr,
-      });
+      console.error("Error in audio processing:", error);
       return true;
     }
   }
