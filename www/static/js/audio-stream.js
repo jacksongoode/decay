@@ -5,272 +5,264 @@ export class AudioStreamManager {
     this.stream = null;
     this.peerConnection = null;
     this.connectionState = connectionState;
-    this.bitrateControl = {
-      min: 2, // 2 kbps minimum
-      max: 128, // 128 kbps maximum
-      current: 128,
-    };
-    this.startTime = null;
-    this.updateInterval = null;
-    this.remoteAudio = new Audio();
-    this.remoteAudio.autoplay = true;
-    this.remoteAudio.playsInline = true; // Important for iOS
     this.audioContext = null;
     this.audioProcessor = null;
-    this.audioInitialized = false;
-    this.isCleaningUp = false;
-    this.setupStateHandlers(connectionState);
-    this.healthCheckInterval = null;
-    this.startHealthCheck();
     this.isProcessingAudio = false;
+    this.analyser = null;
   }
 
-  setupStateHandlers(connectionState) {
-    connectionState.on("connectionFailed", () => this.cleanup());
-    connectionState.on("stateChange", ({ newState }) => {
-      if (newState === connectionState.states.FAILED) {
-        this.cleanup();
-      }
-    });
-  }
-
-  async initializeStream() {
+  async handleRemoteTrack(track, stream) {
     try {
-      this.stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          // Set specific audio parameters
-          autoGainControl: true,
-          channelCount: 2,
-          echoCancellation: false,
-          noiseSuppression: false,
-          sampleRate: 48000, // Explicitly request 48kHz
-          sampleSize: 16,
-        },
-        video: false,
-      });
-      return this.stream;
+      console.log("[AudioStreamManager] Starting remote track handling");
+
+      // Initialize audio context
+      if (!this.audioContext) {
+        this.audioContext = new (window.AudioContext ||
+          window.webkitAudioContext)();
+        await this.audioContext.resume();
+      }
+
+      // Create MediaStream from track
+      const remoteStream = new MediaStream([track]);
+      const source = this.audioContext.createMediaStreamSource(remoteStream);
+
+      // Initialize audio processor
+      this.audioProcessor = new WasmAudioProcessor();
+      this.audioProcessor.setAudioContext(this.audioContext);
+      await this.audioProcessor.setupAudioProcessing(source);
+
+      // Start monitoring audio levels
+      this.startInputMonitoring();
+
+      console.log("[AudioStreamManager] Remote track handling complete");
     } catch (error) {
-      console.error("Microphone access failed:", error);
+      console.error(
+        "[AudioStreamManager] Failed to handle remote track:",
+        error,
+      );
+      throw error;
+    }
+  }
+
+  startInputMonitoring() {
+    if (!this.audioContext || !this.audioProcessor) return;
+
+    // Create analyzer for monitoring
+    const analyzer = this.audioContext.createAnalyser();
+    analyzer.fftSize = 2048;
+
+    // Connect analyzer in parallel to processing chain
+    this.audioProcessor.sourceNode.connect(analyzer);
+
+    const dataArray = new Float32Array(analyzer.frequencyBinCount);
+
+    const checkLevel = () => {
+      analyzer.getFloatTimeDomainData(dataArray);
+      const level = Math.max(...dataArray.map(Math.abs));
+      console.log(`[AudioStreamManager] Input level: ${level.toFixed(4)}`);
+
+      if (this.isProcessingAudio) {
+        requestAnimationFrame(checkLevel);
+      }
+    };
+
+    this.isProcessingAudio = true;
+    checkLevel();
+  }
+
+  startContextMonitoring() {
+    const checkContext = () => {
+      if (!this.audioContext || !this.isProcessingAudio) return;
+
+      if (this.audioContext.state === "suspended") {
+        this.audioContext.resume().catch((error) => {
+          console.warn("[AudioStreamManager] Failed to resume context:", error);
+        });
+      }
+    };
+
+    // Check every second
+    setInterval(checkContext, 1000);
+  }
+
+  async initializeAudio() {
+    if (this.audioContext) return;
+
+    try {
+      const AudioContext = window.AudioContext || window.webkitAudioContext;
+
+      if (!AudioContext) {
+        throw new Error("AudioContext not supported");
+      }
+
+      this.audioContext = new AudioContext({
+        latencyHint: "interactive",
+      });
+
+      this.audioContext.onstatechange = () => {
+        console.log(
+          "[AudioStreamManager] Audio context state:",
+          this.audioContext.state,
+        );
+      };
+
+      if (this.audioContext.state === "suspended") {
+        await this.audioContext.resume();
+      }
+
+      console.log("[AudioStreamManager] Audio context initialized:", {
+        state: this.audioContext.state,
+        sampleRate: this.audioContext.sampleRate,
+      });
+    } catch (error) {
+      console.error("[AudioStreamManager] Failed to initialize audio:", error);
       throw error;
     }
   }
 
   async createPeerConnection(onIceCandidate) {
     try {
-      if (!this.stream) {
-        await this.initializeStream();
+      // Fetch TURN credentials dynamically
+      const response = await fetch(
+        `https://audiodecay.metered.live/api/v1/turn/credentials?apiKey=${process.env.METERED_API_KEY}`,
+      );
+
+      let iceServers = [];
+
+      if (response.ok) {
+        iceServers = await response.json();
+      } else {
+        // Fallback to static configuration
+        iceServers = [
+          { urls: "stun:stun.l.google.com:19302" },
+          {
+            urls: "turn:global.relay.metered.ca:80",
+            username: process.env.TURN_USERNAME,
+            credential: process.env.TURN_CREDENTIAL,
+          },
+          {
+            urls: "turn:global.relay.metered.ca:443",
+            username: process.env.TURN_USERNAME,
+            credential: process.env.TURN_CREDENTIAL,
+          },
+        ];
       }
 
-      // Create peer connection with basic STUN configuration
       this.peerConnection = new RTCPeerConnection({
-        iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+        iceServers,
+        iceCandidatePoolSize: 10,
+        bundlePolicy: "max-bundle",
+        rtcpMuxPolicy: "require",
+        sdpSemantics: "unified-plan",
+        iceTransportPolicy: "all",
       });
 
-      // Add local audio track
-      this.stream.getTracks().forEach((track) => {
-        this.peerConnection.addTrack(track, this.stream);
-      });
-
-      // Connection state monitoring
-      this.peerConnection.onconnectionstatechange = () => {
-        const state = this.peerConnection.connectionState;
-        console.log("Connection state:", state);
-
-        switch (state) {
-          case "connecting":
-            this.connectionState.setState(
-              this.connectionState.states.CONNECTING,
-            );
-            break;
-          case "connected":
-            this.connectionState.setState(
-              this.connectionState.states.CONNECTED,
-            );
-            this.startAudioDecay();
-            break;
-          case "disconnected":
-          case "failed":
-          case "closed":
-            this.cleanup();
-            break;
+      // Reduce ICE candidate logging
+      this.peerConnection.onicecandidate = (event) => {
+        if (event.candidate) {
+          onIceCandidate(event);
         }
       };
 
-      // ICE connection state monitoring
+      // Only log state changes if they indicate a problem
       this.peerConnection.oniceconnectionstatechange = () => {
         const state = this.peerConnection.iceConnectionState;
-        console.log("ICE connection state:", state);
+        if (state === "failed" || state === "disconnected") {
+          console.log("ICE Connection state:", state);
+        }
+      };
 
-        if (state === "failed") {
-          this.connectionState.setState(this.connectionState.states.FAILED);
+      this.peerConnection.onconnectionstatechange = () => {
+        const state = this.peerConnection.connectionState;
+        if (state === "failed" || state === "disconnected") {
+          console.log("Connection state:", state);
           this.cleanup();
         }
       };
 
-      this.peerConnection.onicecandidate = onIceCandidate;
-
-      // Add ontrack handler to verify audio reception
-      this.peerConnection.ontrack = (event) => {
-        console.log("Received remote track:", event.track.kind);
-        this.setupRemoteTrack(event.track, event.streams[0]);
+      this.peerConnection.ontrack = async (event) => {
+        console.log("[AudioStreamManager] Track received:", event.track.kind);
+        if (event.track.kind === "audio") {
+          await this.handleRemoteTrack(event.track, event.streams[0]);
+        }
       };
 
-      // Verify local audio is being sent
-      const audioTracks = this.stream.getAudioTracks();
-      if (audioTracks.length === 0) {
-        throw new Error("No local audio track available");
-      }
-
-      // Monitor audio track state
-      audioTracks.forEach((track) => {
-        track.onended = () => {
-          console.error("Local audio track ended unexpectedly");
-          this.cleanup();
-        };
-        track.onmute = () => {
-          console.warn("Local audio track muted");
-        };
-        track.onunmute = () => {
-          console.log("Local audio track unmuted");
-        };
-      });
+      const audioTrack = await this.getAudioTrackWithFallback();
+      this.peerConnection.addTrack(audioTrack);
 
       return this.peerConnection;
     } catch (error) {
       console.error("PeerConnection failed:", error);
-      this.connectionState.setState(this.connectionState.states.FAILED);
       throw error;
     }
   }
 
-  startAudioDecay() {
-    if (this.updateInterval) {
-      clearInterval(this.updateInterval);
-    }
-
-    this.startTime = Date.now();
-    this.isProcessingAudio = true;
-
-    this.updateInterval = setInterval(() => {
-      if (!this.isProcessingAudio) return;
-
-      const elapsedTime = (Date.now() - this.startTime) / 1000;
-      this.updateBitrate(elapsedTime);
-    }, 500);
-  }
-
-  updateBitrate(elapsedTime) {
-    if (!this.isProcessingAudio) return;
-
-    // Much slower decay factor (closer to 1.0)
-    // Original was 0.92, new value makes decay take about 1 minute
-    const decayFactor = 0.99;
-
-    // Calculate new bitrate using decay formula
-    this.bitrateControl.current = Math.max(
-      this.bitrateControl.min,
-      Math.min(
-        this.bitrateControl.max,
-        this.bitrateControl.current * decayFactor,
-      ),
-    );
-
-    // Alternative linear decay approach:
-    // const totalDecayTime = 60; // 60 seconds
-    // const decayRate = (this.bitrateControl.max - this.bitrateControl.min) / totalDecayTime;
-    // this.bitrateControl.current = Math.max(
-    //   this.bitrateControl.min,
-    //   this.bitrateControl.max - (decayRate * elapsedTime)
-    // );
-
-    // Update connection state with new stats
-    if (this.connectionState) {
-      this.connectionState.updateStats({
-        bitrate: this.bitrateControl.current,
-        elapsedTime: elapsedTime,
-      });
-    }
-  }
-
-  async initializeAudio() {
-    if (this.audioInitialized) return;
+  // Add fallback method for getting audio tracks
+  async getAudioTrackWithFallback() {
+    const constraints = {
+      audio: {
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: true,
+        // Safari and some mobile browsers need these
+        channelCount: { ideal: 2, min: 1 },
+      },
+    };
 
     try {
-      // Create a default AudioContext without specifying sample rate
-      this.audioContext = new (window.AudioContext ||
-        window.webkitAudioContext)();
-
-      console.log(
-        `System audio context created with sample rate: ${this.audioContext.sampleRate}`,
-      );
-
-      // Create the processor with the same context
-      if (!this.audioProcessor) {
-        this.audioProcessor = new WasmAudioProcessor();
-        this.audioProcessor.setAudioContext(this.audioContext);
+      // Modern API
+      if (navigator.mediaDevices?.getUserMedia) {
+        return (
+          await navigator.mediaDevices.getUserMedia(constraints)
+        ).getAudioTracks()[0];
       }
 
-      this.audioInitialized = true;
-      return this.audioContext;
+      // Legacy API fallback
+      const getUserMedia =
+        navigator.getUserMedia ||
+        navigator.webkitGetUserMedia ||
+        navigator.mozGetUserMedia;
+
+      if (!getUserMedia) {
+        throw new Error("Media devices not supported");
+      }
+
+      return new Promise((resolve, reject) => {
+        getUserMedia.call(
+          navigator,
+          constraints,
+          (stream) => resolve(stream.getAudioTracks()[0]),
+          (error) => reject(error),
+        );
+      });
     } catch (error) {
-      console.error("Failed to initialize audio:", error);
+      console.error("Failed to get audio track:", error);
       throw error;
     }
-  }
-
-  async setupRemoteTrack(track, stream) {
-    if (track.kind !== "audio") return;
-
-    try {
-      await this.initializeAudio();
-      await this.audioProcessor.setupAudioProcessing(stream);
-
-      console.log("Remote track setup complete");
-    } catch (err) {
-      console.error("Audio setup failed:", err);
-      await this.cleanup();
-      throw err;
-    }
-  }
-
-  startHealthCheck() {
-    this.healthCheckInterval = setInterval(() => {
-      if (!this.peerConnection || !this.isProcessingAudio) return;
-
-      this.peerConnection.getStats().then((stats) => {
-        let hasActiveAudio = false;
-        stats.forEach((report) => {
-          if (report.type === "inbound-rtp" && report.kind === "audio") {
-            hasActiveAudio = report.packetsReceived > 0;
-          }
-        });
-
-        if (this.isProcessingAudio && !hasActiveAudio) {
-          console.warn("No audio packets detected");
-          this.cleanup();
-          this.connectionState?.setState(this.connectionState.states.FAILED);
-        }
-      });
-    }, 2000);
   }
 
   async cleanup() {
-    if (this.isCleaningUp) return;
-    this.isCleaningUp = true;
-
     try {
+      this.isProcessingAudio = false;
+
       if (this.audioProcessor) {
         await this.audioProcessor.cleanup();
+        this.audioProcessor = null;
       }
-      if (this.audioContext?.state !== "closed") {
-        await this.audioContext?.close();
+
+      if (this.peerConnection) {
+        this.peerConnection.close();
+        this.peerConnection = null;
       }
+
+      if (this.audioContext) {
+        await this.audioContext.close();
+        this.audioContext = null;
+      }
+
+      this.analyser = null;
     } catch (e) {
-      console.warn("Cleanup error:", e);
-    } finally {
-      this.audioContext = null;
-      this.audioInitialized = false;
-      this.isCleaningUp = false;
+      console.warn("[AudioStreamManager] Cleanup error:", e);
     }
   }
 }

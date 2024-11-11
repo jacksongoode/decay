@@ -43,38 +43,22 @@ class AudioDecayClient {
   }
 
   async cleanupConnection(peerId) {
-    // Prevent recursive cleanup
-    if (!this.connections.has(peerId) && !this.audioManagers.has(peerId)) {
+    if (!this.connections.has(peerId) && !this.audioManagers.has(peerId))
       return;
-    }
 
-    console.log(`Starting cleanup for peer: ${peerId}`);
-
-    // Clean up audio manager first
-    const audioManager = this.audioManagers.get(peerId);
-    if (audioManager) {
-      try {
-        if (typeof audioManager.cleanup === "function") {
-          await audioManager.cleanup();
-        }
-      } catch (err) {
-        console.warn("Audio manager cleanup error:", err);
-      } finally {
-        this.audioManagers.delete(peerId);
-      }
-    }
-
-    // Clean up connection state last
     const connection = this.connections.get(peerId);
     if (connection) {
-      try {
-        connection.cleanup();
-      } finally {
-        this.connections.delete(peerId);
-      }
+      clearInterval(connection.statsInterval);
+      connection.cleanup();
+      this.connections.delete(peerId);
     }
 
-    // Reset active connection only if it matches
+    const audioManager = this.audioManagers.get(peerId);
+    if (audioManager) {
+      await audioManager.cleanup().catch(console.warn);
+      this.audioManagers.delete(peerId);
+    }
+
     if (this.activeConnection === peerId) {
       this.activeConnection = null;
       this.updateUserList([...this.users.values()]);
@@ -278,13 +262,15 @@ class AudioDecayClient {
   }
 
   async handleConnectionRequest(message) {
+    // Only accept if we're not already connected
     if (this.activeConnection) {
-      const response = {
-        type: "ConnectionResponse",
-        from_id: message.from_id,
-        accepted: false,
-      };
-      this.ws.send(JSON.stringify(response));
+      this.ws.send(
+        JSON.stringify({
+          type: "ConnectionResponse",
+          from_id: message.from_id,
+          accepted: false,
+        }),
+      );
       return;
     }
 
@@ -296,61 +282,54 @@ class AudioDecayClient {
       const { connectionState, audioManager } = this.initializeConnection(
         message.from_id,
       );
-      this.activeConnection = message.from_id; // Set active connection for receiving peer
-      this.updateUserList([...this.users.values()]); // Update UI immediately
+      this.activeConnection = message.from_id;
+      this.updateUserList([...this.users.values()]);
 
       try {
-        const onIceCandidate = (event) => {
-          if (event.candidate) {
-            const candidateMsg = {
-              type: "RTCCandidate",
-              from_id: this.userId,
-              to_id: message.from_id,
-              candidate: JSON.stringify(event.candidate),
-            };
-            this.ws.send(JSON.stringify(candidateMsg));
-          }
-        };
+        const peerConnection = await audioManager.createPeerConnection(
+          (event) => {
+            console.log(
+              "Received track:",
+              event.track.kind,
+              event.track.readyState,
+            );
+            if (event.track.kind === "audio") {
+              this.addLogEntry(
+                `Receiving audio from User ${message.from_id}`,
+                "connect",
+              );
+              audioManager.handleRemoteTrack(event.track, event.streams[0]);
+            }
+          },
+        );
 
-        const peerConnection =
-          await audioManager.createPeerConnection(onIceCandidate);
-
-        peerConnection.ontrack = async (event) => {
-          this.addLogEntry(
-            `Receiving audio from User ${message.from_id}`,
-            "connect",
-          );
-          const audio = new Audio();
-          audio.srcObject = event.streams[0];
-          this.setupAudioPlayback(audio, audioManager);
-        };
-        const offer = await peerConnection.createOffer();
+        // Create and send offer
+        const offer = await peerConnection.createOffer({
+          offerToReceiveAudio: true,
+        });
         await peerConnection.setLocalDescription(offer);
 
-        const offerMsg = {
-          type: "RTCOffer",
-          from_id: this.userId,
-          to_id: message.from_id,
-          offer: JSON.stringify(offer),
-        };
-        this.ws.send(JSON.stringify(offerMsg));
-        this.addLogEntry(
-          `Sent connection request to User ${message.from_id}`,
-          "connect",
+        this.ws.send(
+          JSON.stringify({
+            type: "RTCOffer",
+            from_id: this.userId,
+            to_id: message.from_id,
+            offer: JSON.stringify(offer),
+          }),
         );
       } catch (error) {
-        this.activeConnection = null; // Clear on error
         this.addLogEntry(`Connection error: ${error.message}`, "disconnect");
-        this.cleanupConnection(message.from_id);
+        await this.cleanupConnection(message.from_id);
       }
     }
 
-    const response = {
-      type: "ConnectionResponse",
-      from_id: message.from_id,
-      accepted,
-    };
-    this.ws.send(JSON.stringify(response));
+    this.ws.send(
+      JSON.stringify({
+        type: "ConnectionResponse",
+        from_id: message.from_id,
+        accepted,
+      }),
+    );
   }
 
   async handleConnectionResponse(message) {
@@ -369,52 +348,49 @@ class AudioDecayClient {
   }
 
   async requestConnection(peerId) {
-    if (this.activeConnection === peerId) return;
-
     try {
-      // The initializeConnection returns an object with both connectionState and audioManager
-      const result = this.initializeConnection(peerId);
-      if (!result) return; // Early return if initialization fails
-
-      const { connectionState, audioManager } = result;
-
-      // Track connection attempt
+      const { connectionState, audioManager } =
+        this.initializeConnection(peerId);
       this.activeConnection = peerId;
-      connectionState.setState(connectionState.states.CONNECTING);
+      this.updateUserList([...this.users.values()]);
 
-      // Create peer connection first
-      await audioManager.createPeerConnection((event) => {
+      const onIceCandidate = (event) => {
         if (event.candidate) {
-          this.ws.send(
-            JSON.stringify({
-              type: "RTCCandidate",
-              from_id: this.userId,
-              to_id: peerId,
-              candidate: JSON.stringify(event.candidate),
-            }),
-          );
+          const candidateMsg = {
+            type: "RTCCandidate",
+            from_id: this.userId,
+            to_id: peerId,
+            candidate: JSON.stringify(event.candidate),
+          };
+          this.ws.send(JSON.stringify(candidateMsg));
         }
+      };
+
+      const peerConnection =
+        await audioManager.createPeerConnection(onIceCandidate);
+
+      // Create and send the offer with audio transceivers
+      const offer = await peerConnection.createOffer({
+        offerToReceiveAudio: true,
       });
 
-      // Now create and set offer
-      const offer = await audioManager.peerConnection.createOffer();
-      await audioManager.peerConnection.setLocalDescription(offer);
+      await peerConnection.setLocalDescription(offer);
 
-      this.ws.send(
-        JSON.stringify({
-          type: "RTCOffer",
-          from_id: this.userId,
-          to_id: peerId,
-          offer: JSON.stringify(offer),
-        }),
-      );
+      const offerMsg = {
+        type: "RTCOffer",
+        from_id: this.userId,
+        to_id: peerId,
+        offer: JSON.stringify(offer),
+      };
 
-      this.updateUserList([...this.users.values()]);
+      this.ws.send(JSON.stringify(offerMsg));
+      this.addLogEntry(`Sent connection request to User ${peerId}`, "connect");
     } catch (error) {
       console.error("Connection request failed:", error);
       this.activeConnection = null;
+      this.addLogEntry(`Connection error: ${error.message}`, "disconnect");
       await this.cleanupConnection(peerId);
-      throw error; // Propagate error for proper handling
+      throw error;
     }
   }
 
@@ -423,48 +399,35 @@ class AudioDecayClient {
       message.from_id,
     );
 
-    // Set active connection and update UI immediately
-    this.activeConnection = message.from_id;
-    connectionState.setState(connectionState.states.CONNECTING);
-    this.updateUserList([...this.users.values()]);
-
     try {
       const peerConnection = await audioManager.createPeerConnection(
         (event) => {
           if (event.candidate) {
-            const candidateMsg = {
-              type: "RTCCandidate",
-              from_id: this.userId,
-              to_id: message.from_id,
-              candidate: JSON.stringify(event.candidate),
-            };
-            this.ws.send(JSON.stringify(candidateMsg));
+            this.ws.send(
+              JSON.stringify({
+                type: "RTCCandidate",
+                from_id: this.userId,
+                to_id: message.from_id,
+                candidate: JSON.stringify(event.candidate),
+              }),
+            );
           }
         },
       );
 
-      // Add ontrack handler for receiving end
-      peerConnection.ontrack = async (event) => {
-        this.addLogEntry(
-          `Receiving audio from User ${message.from_id}`,
-          "connect",
-        );
-        const audio = new Audio();
-        audio.srcObject = event.streams[0];
-        await this.setupAudioPlayback(audio, audioManager);
-      };
-
-      // First set the remote description
+      // Set remote description first
       const offer = JSON.parse(message.offer);
       await peerConnection.setRemoteDescription(
         new RTCSessionDescription(offer),
       );
 
-      // Then create and set local description
-      const answer = await peerConnection.createAnswer();
+      // Create and set local description
+      const answer = await peerConnection.createAnswer({
+        offerToReceiveAudio: true,
+      });
       await peerConnection.setLocalDescription(answer);
 
-      // Send answer
+      // Send answer immediately
       this.ws.send(
         JSON.stringify({
           type: "RTCAnswer",
@@ -474,24 +437,12 @@ class AudioDecayClient {
         }),
       );
 
-      // Wait for ICE gathering to complete
-      if (peerConnection.iceGatheringState !== "complete") {
-        await new Promise((resolve) => {
-          peerConnection.addEventListener("icegatheringstatechange", () => {
-            if (peerConnection.iceGatheringState === "complete") {
-              resolve();
-            }
-          });
-        });
-      }
-
-      // Update state after successful connection
-      connectionState.setState(connectionState.states.CONNECTED);
+      // Set active connection AFTER successful setup
+      this.activeConnection = message.from_id;
+      this.updateUserList([...this.users.values()]);
     } catch (error) {
       console.error("Failed to handle offer:", error);
-      this.activeConnection = null;
-      connectionState.setState(connectionState.states.FAILED);
-      this.cleanupConnection(message.from_id);
+      await this.cleanupConnection(message.from_id);
     }
   }
 
@@ -499,84 +450,69 @@ class AudioDecayClient {
     const audioManager = this.audioManagers.get(message.from_id);
     const connectionState = this.connections.get(message.from_id);
 
-    // More comprehensive state checking
-    if (!audioManager?.peerConnection || !connectionState) {
-      console.warn("Invalid connection state for answer");
-      await this.cleanupConnection(message.from_id);
-      return;
-    }
-
     try {
       const answer = JSON.parse(message.answer);
-      const signalingState = audioManager.peerConnection.signalingState;
+      await audioManager.peerConnection.setRemoteDescription(
+        new RTCSessionDescription(answer),
+      );
 
-      // Enhanced state validation
-      if (signalingState === "have-local-offer") {
-        await audioManager.peerConnection.setRemoteDescription(
-          new RTCSessionDescription(answer),
-        );
+      await new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          reject(new Error("Connection timeout"));
+        }, 30000);
 
-        // Wait for connection to stabilize
-        await new Promise((resolve, reject) => {
-          const timeout = setTimeout(
-            () => reject(new Error("Connection timeout")),
-            5000,
-          );
+        let iceComplete = false;
+        let connectionComplete = false;
 
-          const checkState = () => {
-            if (audioManager.peerConnection.connectionState === "connected") {
-              clearTimeout(timeout);
-              resolve();
-            } else if (
-              audioManager.peerConnection.connectionState === "failed"
-            ) {
-              clearTimeout(timeout);
-              reject(new Error("Connection failed"));
-            }
-          };
-
-          audioManager.peerConnection.addEventListener(
-            "connectionstatechange",
-            checkState,
-          );
-          checkState(); // Check immediately in case we're already connected
-        });
-
-        connectionState.setState(connectionState.states.CONNECTED);
-      } else {
-        throw new Error(`Invalid signaling state: ${signalingState}`);
-      }
-    } catch (error) {
-      console.error("Failed to handle answer:", error);
-
-      // Enhanced error handling with retries
-      if (this.activeConnection === message.from_id) {
-        const maxRetries = 3;
-        let retryCount = 0;
-
-        const retry = async () => {
-          if (retryCount >= maxRetries) {
-            await this.cleanupConnection(message.from_id);
-            return;
+        const checkState = () => {
+          if (
+            audioManager.peerConnection.iceConnectionState === "failed" ||
+            audioManager.peerConnection.connectionState === "failed"
+          ) {
+            console.log("Connection failed");
+            clearTimeout(timeout);
+            reject(new Error("Connection failed"));
           }
 
-          try {
-            retryCount++;
-            await this.cleanupConnection(message.from_id);
-            await new Promise((resolve) =>
-              setTimeout(resolve, 1000 * retryCount),
-            );
-            await this.requestConnection(message.from_id);
-          } catch (retryError) {
-            console.error(`Retry ${retryCount} failed:`, retryError);
-            await retry();
+          if (audioManager.peerConnection.iceGatheringState === "complete") {
+            iceComplete = true;
+          }
+
+          if (
+            ["connected", "completed"].includes(
+              audioManager.peerConnection.iceConnectionState,
+            )
+          ) {
+            connectionComplete = true;
+          }
+
+          if (iceComplete && connectionComplete) {
+            clearTimeout(timeout);
+            resolve();
           }
         };
 
-        await retry();
-      } else {
-        await this.cleanupConnection(message.from_id);
-      }
+        audioManager.peerConnection.addEventListener(
+          "icegatheringstatechange",
+          checkState,
+        );
+        audioManager.peerConnection.addEventListener(
+          "iceconnectionstatechange",
+          checkState,
+        );
+        audioManager.peerConnection.addEventListener(
+          "connectionstatechange",
+          checkState,
+        );
+
+        checkState();
+      });
+
+      await this.monitorConnection(message.from_id);
+      connectionState.setState(connectionState.states.CONNECTED);
+    } catch (error) {
+      console.error("Failed to handle answer:", error);
+      await this.cleanupConnection(message.from_id);
     }
   }
 
@@ -635,51 +571,63 @@ class AudioDecayClient {
   async handleConnectionFailure(peerId) {
     console.log("Handling connection failure for peer:", peerId);
 
-    const maxRetries = 3;
-    const baseDelay = 1000; // 1 second base delay
+    // Single cleanup attempt with no retries
+    await this.cleanupConnection(peerId);
 
-    const cleanup = async () => {
-      if (this.audioManagers.has(peerId)) {
-        const audioManager = this.audioManagers.get(peerId);
-        await audioManager?.cleanup().catch(console.warn);
-        this.audioManagers.delete(peerId);
-      }
+    // Only attempt reconnection if this is still the active connection
+    if (this.activeConnection === peerId) {
+      this.addLogEntry(`Connection failed with User ${peerId}`, "disconnect");
+      this.activeConnection = null;
+      this.updateUserList([...this.users.values()]);
+    }
+  }
 
-      if (this.connections.has(peerId)) {
-        await this.cleanupConnection(peerId);
-      }
-    };
+  async monitorConnection(peerId) {
+    const audioManager = this.audioManagers.get(peerId);
+    const connectionState = this.connections.get(peerId);
+    if (!audioManager?.peerConnection || !connectionState) return;
 
-    // Use exponential backoff with Promise
-    const attemptReconnection = async (attempt = 0) => {
-      if (attempt >= maxRetries) {
-        this.addLogEntry(
-          `Connection failed after ${maxRetries} attempts`,
-          "disconnect",
-        );
-        await cleanup();
-        return;
-      }
+    const startTime = Date.now();
+    let lastBytes = 0;
+    let lastTimestamp = startTime;
 
-      const delay = baseDelay * Math.pow(2, attempt);
+    const updateStats = async () => {
+      if (this.activeConnection !== peerId) return;
 
       try {
-        await cleanup();
+        const stats = await audioManager.peerConnection.getStats();
+        let bitrate = 0;
 
-        // Only attempt reconnection if this is still the active connection
-        if (this.activeConnection === peerId) {
-          await new Promise((resolve) => setTimeout(resolve, delay));
-          await this.requestConnection(peerId);
-        }
+        stats.forEach((report) => {
+          if (report.type === "inbound-rtp" && report.kind === "audio") {
+            const now = report.timestamp;
+            const bytes = report.bytesReceived;
+            const timeDiff = (now - lastTimestamp) / 1000; // Convert to seconds
+
+            if (lastBytes > 0 && timeDiff > 0) {
+              // Calculate bitrate in kbps
+              bitrate = Math.round(
+                ((bytes - lastBytes) * 8) / (timeDiff * 1000),
+              );
+            }
+
+            lastBytes = bytes;
+            lastTimestamp = now;
+          }
+        });
+
+        connectionState.updateStats({
+          bitrate,
+          elapsedTime: (Date.now() - startTime) / 1000,
+        });
       } catch (error) {
-        console.error(`Reconnection attempt ${attempt + 1} failed:`, error);
-        // Recursively try next attempt
-        await attemptReconnection(attempt + 1);
+        console.warn("Failed to get connection stats:", error);
       }
     };
 
-    // Start the reconnection process
-    await attemptReconnection();
+    // Update stats every second
+    const statsInterval = setInterval(updateStats, 1000);
+    this.connections.get(peerId).statsInterval = statsInterval;
   }
 }
 

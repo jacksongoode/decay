@@ -1,4 +1,5 @@
 // New file: www/js/wasm-audio-processor.js
+import { AUDIO_CONSTANTS } from "./audio-constants.js";
 import init, { AudioProcessor } from "./wasm/decay_wasm.js";
 
 export class WasmAudioProcessor {
@@ -6,109 +7,24 @@ export class WasmAudioProcessor {
     this.audioContext = null;
     this.workletNode = null;
     this.wasmProcessor = null;
+    this.wasmMemory = null;
     this.sourceNode = null;
-    this.wasmInitialized = false;
   }
 
   setAudioContext(context) {
     this.audioContext = context;
-    console.log("Audio context set with sample rate:", context.sampleRate);
   }
 
-  async setupAudioProcessing(stream) {
+  async setupAudioProcessing(sourceNode) {
     try {
-      if (!this.audioContext) {
-        throw new Error("AudioContext must be set before setupAudioProcessing");
-      }
+      this.sourceNode = sourceNode;
 
-      console.log(
-        "Setting up audio processing with context sample rate:",
-        this.audioContext.sampleRate,
-      );
+      await this.initializeWasm();
 
-      // Create a new MediaStreamAudioSourceNode
-      this.sourceNode = this.audioContext.createMediaStreamSource(stream);
+      // Load the worklet module first
+      await this.audioContext.audioWorklet.addModule('/static/js/audio-decay-worklet.js');
 
-      // Initialize worklet if not already done
-      if (!this.workletNode) {
-        await this.initializeWorklet();
-      }
-
-      // Connect the nodes
-      this.sourceNode.connect(this.workletNode);
-      this.workletNode.connect(this.audioContext.destination);
-
-      // Add a gain node for volume control (optional)
-      this.gainNode = this.audioContext.createGain();
-      this.gainNode.gain.value = 1.0; // Full volume
-
-      // Connect through gain node
-      this.workletNode.disconnect(); // Disconnect previous
-      this.sourceNode.connect(this.workletNode);
-      this.workletNode.connect(this.gainNode);
-      this.gainNode.connect(this.audioContext.destination);
-
-      // Resume the audio context if it's suspended
-      if (this.audioContext.state === "suspended") {
-        await this.audioContext.resume();
-      }
-
-      console.log("Audio processing setup complete");
-    } catch (error) {
-      console.error("Audio processing setup failed:", error);
-      throw error;
-    }
-  }
-
-  async initializeWasm() {
-    if (!this.wasmInitialized) {
-      // Initialize WASM with explicit memory configuration
-      const memory = new WebAssembly.Memory({
-        initial: 256, // Start with 16MB (256 pages * 64KB)
-        maximum: 512, // Allow growth up to 32MB
-        shared: false, // Non-shared memory for better compatibility
-      });
-
-      await init({
-        env: { memory },
-      });
-
-      this.wasmProcessor = new AudioProcessor();
-
-      // Verify WASM initialization
-      if (!this.wasmProcessor) {
-        throw new Error("WASM initialization failed - processor not created");
-      }
-
-      // Store memory reference
-      this.wasmMemory = memory;
-      this.wasmInitialized = true;
-
-      console.log("WASM processor initialized with:", {
-        inputPtr: this.wasmProcessor.get_input_buffer_ptr(),
-        outputPtr: this.wasmProcessor.get_output_buffer_ptr(),
-        memoryBuffer: this.wasmMemory.buffer.byteLength,
-      });
-    }
-    return this.wasmProcessor;
-  }
-
-  async initializeWorklet() {
-    try {
-      // Create a promise we can use to coordinate WASM initialization
-      this.wasmInitPromise = this.initializeWasm();
-
-      // Wait for WASM to be fully initialized
-      const wasmProcessor = await this.wasmInitPromise;
-
-      // Store WASM instance reference
-      this.wasmProcessor = wasmProcessor;
-
-      // Now initialize the worklet
-      const workletUrl = new URL("./audio-decay-worklet.js", import.meta.url);
-      await this.audioContext.audioWorklet.addModule(workletUrl);
-
-      // Create worklet with guaranteed WASM initialization
+      // Create and configure worklet node
       this.workletNode = new AudioWorkletNode(
         this.audioContext,
         "audio-decay-processor",
@@ -116,158 +32,84 @@ export class WasmAudioProcessor {
           numberOfInputs: 1,
           numberOfOutputs: 1,
           channelCount: 2,
-          processorOptions: {
-            // Ensure we're using the latest memory references
-            wasmMemoryBuffer: this.wasmMemory.buffer,
-            inputPtr: this.wasmProcessor.get_input_buffer_ptr(),
-            outputPtr: this.wasmProcessor.get_output_buffer_ptr(),
-          },
+          channelCountMode: "explicit",
+          channelInterpretation: "speakers",
         },
       );
 
-      // Implement a more robust message handling system
-      this.workletNode.port.onmessage = async (event) => {
-        switch (event.data.type) {
-          case "requestWasm":
-            try {
-              if (!this.wasmProcessor) {
-                await this.wasmInitPromise;
-              }
-
-              // Create shared buffer
-              const sharedBuffer = new SharedArrayBuffer(
-                this.wasmMemory.buffer.byteLength,
-              );
-
-              // Copy the WASM memory into our shared buffer
-              const sourceView = new Uint8Array(this.wasmMemory.buffer);
-              const targetView = new Uint8Array(sharedBuffer);
-              targetView.set(sourceView);
-
-              // Send the shared buffer to the worklet WITHOUT including it in transfer list
-              this.workletNode.port.postMessage({
-                type: "init",
-                memory: {
-                  buffer: sharedBuffer,
-                  inputPtr: this.wasmProcessor.get_input_buffer_ptr(),
-                  outputPtr: this.wasmProcessor.get_output_buffer_ptr(),
-                  sampleRate: this.audioContext.sampleRate,
-                },
-              }); // Remove the transfer list
-
-              console.log("Sent shared buffer to worklet:", {
-                bufferSize: sharedBuffer.byteLength,
-                inputPtr: this.wasmProcessor.get_input_buffer_ptr(),
-                outputPtr: this.wasmProcessor.get_output_buffer_ptr(),
-              });
-            } catch (err) {
-              console.error("Failed to send memory to worklet:", err);
-              throw err;
-            }
-            break;
-
-          case "processAudio":
-            try {
-              // Process the audio using WASM
-              if (this.wasmProcessor) {
-                this.wasmProcessor.process_audio(event.data.length);
-              }
-            } catch (err) {
-              console.error("WASM audio processing failed:", err);
-            }
-            break;
-
-          case "processorReady":
-            console.log("AudioWorklet processor is ready");
-            break;
-
-          case "error":
-            console.error("AudioWorklet processor error:", event.data.error);
-            break;
+      // Set up message handling
+      this.workletNode.port.onmessage = (event) => {
+        if (event.data.type === "requestWasmMemory") {
+          this.sendWasmMemory();
+        } else if (event.data.type === "processAudio") {
+          const { offset, length } = event.data;
+          this.wasmProcessor.process_audio(offset, length);
         }
       };
 
-      // Add error handling for the worklet node
-      this.workletNode.onprocessorerror = (err) => {
-        console.error("AudioWorklet processor error:", err);
-        // Attempt recovery
-        this.reinitializeProcessor();
-      };
+      // Connect the audio chain
+      this.sourceNode.connect(this.workletNode);
+      this.workletNode.connect(this.audioContext.destination);
 
-      return this.workletNode;
+      console.log("[WasmAudioProcessor] Audio chain connected");
     } catch (error) {
-      console.error("Failed to initialize worklet:", error);
+      console.error("[WasmAudioProcessor] Setup failed:", error);
       throw error;
     }
   }
 
-  // Add a recovery method
-  async reinitializeProcessor() {
+  async sendWasmMemory() {
+    if (!this.wasmMemory || !this.wasmProcessor) {
+      throw new Error("WASM not initialized");
+    }
+
+    this.workletNode.port.postMessage({
+      type: "init",
+      memory: {
+        buffer: this.wasmMemory.buffer,
+        inputPtr: this.wasmProcessor.get_input_buffer_ptr(),
+        outputPtr: this.wasmProcessor.get_output_buffer_ptr(),
+      },
+    });
+  }
+
+  async initializeWasm() {
     try {
-      // Clean up existing processor
+      this.wasmMemory = new WebAssembly.Memory({
+        initial: 256,
+        maximum: 512,
+        shared: true,
+      });
+
+      await init();
+      this.wasmProcessor = new AudioProcessor();
+
+      console.log("[WasmAudioProcessor] WASM initialized");
+    } catch (error) {
+      console.error("[WasmAudioProcessor] WASM initialization failed:", error);
+      throw error;
+    }
+  }
+
+  async cleanup() {
+    try {
+      if (this.sourceNode) {
+        this.sourceNode.disconnect();
+        this.sourceNode = null;
+      }
+
       if (this.workletNode) {
         this.workletNode.disconnect();
         this.workletNode = null;
       }
 
-      // Re-initialize WASM
-      this.wasmInitialized = false;
-      await this.initializeWasm();
+      this.wasmProcessor = null;
+      this.wasmMemory = null;
 
-      // Recreate worklet
-      await this.initializeWorklet();
-
-      // Reconnect audio nodes if needed
-      if (this.sourceNode) {
-        this.sourceNode.connect(this.workletNode);
-        this.workletNode.connect(this.audioContext.destination);
-      }
-    } catch (err) {
-      console.error("Failed to recover processor:", err);
-      throw err;
+      console.log("[WasmAudioProcessor] Cleanup complete");
+    } catch (error) {
+      console.warn("[WasmAudioProcessor] Cleanup error:", error);
     }
-  }
-
-  adjustBitrate(targetBitrate) {
-    if (!this.wasmProcessor) {
-      console.warn("WASM processor not initialized");
-      return targetBitrate;
-    }
-    return this.wasmProcessor.adjust_bitrate(targetBitrate);
-  }
-
-  async cleanup() {
-    if (this._cleanupPromise) return this._cleanupPromise;
-
-    this._cleanupPromise = (async () => {
-      try {
-        if (this.gainNode) {
-          this.gainNode.disconnect();
-          this.gainNode = null;
-        }
-        // Cancel any pending initialization
-        this.wasmInitPromise = null;
-
-        if (this.workletNode) {
-          this.workletNode.port.onmessage = null;
-          this.workletNode.onprocessorerror = null;
-          this.workletNode.disconnect();
-          this.workletNode = null;
-        }
-        if (this.sourceNode) {
-          this.sourceNode.disconnect();
-          this.sourceNode = null;
-        }
-
-        // Clear WASM state
-        this.wasmProcessor = null;
-        this.wasmInitialized = false;
-      } catch (err) {
-        console.warn("WasmAudioProcessor cleanup error:", err);
-      }
-    })();
-
-    return this._cleanupPromise;
   }
 }
 

@@ -243,18 +243,6 @@
         <div id="connection-log"></div>
     </div>
 
-    <script>
-        // Add this before your main.js
-        fetch('/static/js/audio-decay-worklet.js')
-            .then(response => {
-                if (!response.ok) throw new Error(`HTTP ${response.status}`);
-                console.log('AudioWorklet file is accessible');
-                return response.text();
-            })
-            .then(text => console.log('AudioWorklet content length:', text.length))
-            .catch(err => console.error('AudioWorklet file error:', err));
-    </script>
-
     <script type="module" src="/static/js/main.js"></script>
 </body>
 

@@ -5,70 +5,38 @@ use wasm_bindgen::prelude::*;
 extern "C" {
     #[wasm_bindgen(js_namespace = console)]
     fn log(s: &str);
-
-    #[wasm_bindgen(js_namespace = console, js_name = log)]
-    fn log_u32(a: u32);
-
-    #[wasm_bindgen(js_namespace = console, js_name = log)]
-    fn log_many(a: &str, b: &str);
 }
 
 macro_rules! console_log {
     ($($t:tt)*) => (log(&format_args!($($t)*).to_string()))
 }
 
-#[wasm_bindgen]
-#[derive(Default)]
-pub struct AudioMetrics {
-    pub spectral_complexity: f64,
-}
-
-#[wasm_bindgen]
-impl AudioMetrics {
-    #[wasm_bindgen(constructor)]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn analyze_buffer(&mut self, samples: &[f32]) {
-        // Simple spectral complexity estimation
-        let mut sum_differences = 0.0;
-        for window in samples.windows(2) {
-            if let [a, b] = window {
-                sum_differences += (b - a).abs() as f64;
-            }
-        }
-
-        // Normalize and update complexity
-        self.spectral_complexity = (sum_differences / samples.len() as f64).min(1.0).max(0.0);
-    }
-}
-
 const BUFFER_SIZE: usize = 2048;
 
 #[wasm_bindgen]
 pub struct AudioProcessor {
-    current_bitrate: u32,
-    min_bitrate: u32,
-    max_bitrate: u32,
-    sample_reduction: f32,
     input_buffer: Vec<f32>,
     output_buffer: Vec<f32>,
-    // Add sample_rate if you need it for processing
-    // sample_rate: f32,
+    bit_depth: u32,
+    sample_rate: f32,
+    buffer_position: usize,
+    processing_enabled: bool,
 }
 
 #[wasm_bindgen]
 impl AudioProcessor {
     #[wasm_bindgen(constructor)]
     pub fn new() -> Self {
-        AudioProcessor {
-            current_bitrate: 128000,
-            min_bitrate: 1000,
-            max_bitrate: 128000,
-            sample_reduction: 1.0,
+        console_error_panic_hook::set_once();
+        console_log!("Creating new AudioProcessor");
+
+        Self {
             input_buffer: vec![0.0; BUFFER_SIZE],
             output_buffer: vec![0.0; BUFFER_SIZE],
+            bit_depth: 16,
+            sample_rate: 48000.0,
+            buffer_position: 0,
+            processing_enabled: true,
         }
     }
 
@@ -83,60 +51,92 @@ impl AudioProcessor {
     }
 
     #[wasm_bindgen]
-    pub fn process_audio(&mut self, length: usize) {
-        // Call the existing buffer processing method with the current sample rate
-        self.process_audio_buffer(length, 44100.0); // We could make sample_rate a struct field if needed
+    pub fn process_audio(&mut self, offset: usize, length: usize) {
+        if offset + length > BUFFER_SIZE {
+            return;
+        }
+
+        let input = &self.input_buffer[offset..offset + length];
+        let output = &mut self.output_buffer[offset..offset + length];
+
+        // Apply more aggressive processing
+        for (i, &sample) in input.iter().enumerate() {
+            // Apply bit reduction with gain
+            let scale = (1 << (self.bit_depth - 1)) as f32;
+            let processed = (sample * scale * 2.0).round() / scale; // Added gain
+            output[i] = processed.max(-1.0).min(1.0); // Clamp to prevent distortion
+        }
+
+        // Update buffer position
+        self.buffer_position = (self.buffer_position + length) % BUFFER_SIZE;
     }
 
     #[wasm_bindgen]
-    pub fn process_audio_buffer(&mut self, length: usize, sample_rate: f32) {
-        // Process in chunks for better SIMD optimization
-        const CHUNK_SIZE: usize = 64;
+    pub fn set_bit_depth(&mut self, depth: u32) {
+        self.bit_depth = depth.clamp(4, 16);
+        console_log!("Bit depth set to {}", self.bit_depth);
+    }
 
-        for chunk_start in (0..length).step_by(CHUNK_SIZE) {
-            let chunk_end = (chunk_start + CHUNK_SIZE).min(length);
+    #[wasm_bindgen]
+    pub fn set_sample_rate(&mut self, rate: f32) {
+        self.sample_rate = rate;
+        console_log!("Sample rate set to {}", rate);
+    }
 
-            // Process chunk of samples
-            for i in chunk_start..chunk_end {
-                let processed = self.process_single_sample(self.input_buffer[i]);
-                self.output_buffer[i] = processed;
-            }
+    #[wasm_bindgen]
+    pub fn enable_processing(&mut self, enabled: bool) {
+        self.processing_enabled = enabled;
+        console_log!("Processing enabled: {}", enabled);
+    }
+
+    #[wasm_bindgen]
+    pub fn get_buffer_size(&self) -> usize {
+        BUFFER_SIZE
+    }
+
+    #[wasm_bindgen]
+    pub fn get_buffer_position(&self) -> usize {
+        self.buffer_position
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_audio_processing() {
+        let mut processor = AudioProcessor::new();
+
+        // Test with simple sine wave
+        for i in 0..BUFFER_SIZE {
+            let t = i as f32 / 48000.0;
+            processor.input_buffer[i] = (t * 440.0 * 2.0 * std::f32::consts::PI).sin();
+        }
+
+        processor.process_audio(0, BUFFER_SIZE);
+
+        // Verify output is within bounds
+        for sample in processor.output_buffer.iter() {
+            assert!(sample.abs() <= 1.0);
         }
     }
 
-    #[inline(always)]
-    fn process_single_sample(&mut self, sample: f32) -> f32 {
-        // Fast path for high quality
-        if self.sample_reduction > 0.95 {
-            return sample;
+    #[test]
+    fn test_processing_disabled() {
+        let mut processor = AudioProcessor::new();
+        processor.enable_processing(false);
+
+        // Fill input with test data
+        for i in 0..BUFFER_SIZE {
+            processor.input_buffer[i] = (i as f32 / BUFFER_SIZE * 2.0 - 1.0) * 0.99;
         }
 
-        let bit_depth = (24.0 * self.sample_reduction).max(8.0) as i32;
-        let quantization_steps = 1_u32.wrapping_shl(bit_depth as u32) as f32;
+        processor.process_audio(0, BUFFER_SIZE);
 
-        // Optimized processing path
-        let processed = if sample.abs() > 0.8 {
-            sample * (1.0 - (sample.abs() - 0.8) * 0.75)
-        } else {
-            sample
-        };
-
-        let noise = (rand::random::<f32>() - 0.5) * (1.0 / quantization_steps);
-        ((processed + noise * self.sample_reduction) * quantization_steps).floor()
-            / quantization_steps
-    }
-
-    pub fn adjust_bitrate(&mut self, target_bitrate: u32) -> u32 {
-        console_log!("WASM Adjusting bitrate to {} kbps", target_bitrate / 1000);
-
-        // Simply clamp to valid range
-        self.current_bitrate = target_bitrate.clamp(self.min_bitrate, self.max_bitrate);
-
-        // Update sample reduction based on current bitrate
-        self.sample_reduction = (self.current_bitrate as f32 / self.max_bitrate as f32)
-            .powf(2.5) // Non-linear reduction
-            .max(0.05); // Lower minimum quality
-
-        self.current_bitrate
+        // Verify output is unchanged
+        for i in 0..BUFFER_SIZE {
+            assert_eq!(processor.input_buffer[i], processor.output_buffer[i]);
+        }
     }
 }
