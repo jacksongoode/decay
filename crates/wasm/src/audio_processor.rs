@@ -11,32 +11,36 @@ macro_rules! console_log {
     ($($t:tt)*) => (log(&format_args!($($t)*).to_string()))
 }
 
-const BUFFER_SIZE: usize = 2048;
+const BUFFER_SIZE: usize = 128;
 
 #[wasm_bindgen]
 pub struct AudioProcessor {
     input_buffer: Vec<f32>,
     output_buffer: Vec<f32>,
-    bit_depth: u32,
+    bit_depth: u8,
     sample_rate: f32,
-    buffer_position: usize,
     processing_enabled: bool,
+    buffer_position: usize,
+    start_time: Option<f64>,
+    decay_duration: f64,
+    initial_bit_depth: u8,
 }
 
 #[wasm_bindgen]
 impl AudioProcessor {
     #[wasm_bindgen(constructor)]
     pub fn new() -> Self {
-        console_error_panic_hook::set_once();
         console_log!("Creating new AudioProcessor");
-
         Self {
             input_buffer: vec![0.0; BUFFER_SIZE],
             output_buffer: vec![0.0; BUFFER_SIZE],
             bit_depth: 16,
+            initial_bit_depth: 16,
             sample_rate: 48000.0,
-            buffer_position: 0,
             processing_enabled: true,
+            buffer_position: 0,
+            start_time: None,
+            decay_duration: 30.0,
         }
     }
 
@@ -52,27 +56,63 @@ impl AudioProcessor {
 
     #[wasm_bindgen]
     pub fn process_audio(&mut self, offset: usize, length: usize) {
-        if offset + length > BUFFER_SIZE {
+        if !self.processing_enabled || offset + length > BUFFER_SIZE {
             return;
         }
 
-        let input = &self.input_buffer[offset..offset + length];
-        let output = &mut self.output_buffer[offset..offset + length];
-
-        // Apply more aggressive processing
-        for (i, &sample) in input.iter().enumerate() {
-            // Apply bit reduction with gain
-            let scale = (1 << (self.bit_depth - 1)) as f32;
-            let processed = (sample * scale * 2.0).round() / scale; // Added gain
-            output[i] = processed.max(-1.0).min(1.0); // Clamp to prevent distortion
+        // Initialize start time if not set
+        if self.start_time.is_none() {
+            self.start_time = Some(js_sys::Date::now() / 1000.0);
+            self.initial_bit_depth = self.bit_depth;
         }
 
-        // Update buffer position
-        self.buffer_position = (self.buffer_position + length) % BUFFER_SIZE;
+        // Calculate decay progress (0.0 to 1.0)
+        let current_time = js_sys::Date::now() / 1000.0;
+        let elapsed = current_time - self.start_time.unwrap();
+        let decay_progress = (elapsed / self.decay_duration).min(1.0);
+
+        // Degrade bit depth over time (from initial to 4 bits)
+        let target_bit_depth =
+            (self.initial_bit_depth as f64 * (1.0 - decay_progress) + 4.0 * decay_progress) as u8;
+        self.bit_depth = target_bit_depth.max(4);
+
+        // Calculate sample rate reduction (skip more samples as time progresses)
+        let sample_skip = ((decay_progress * 4.0) as usize).max(1);
+
+        let input_slice = &self.input_buffer[offset..offset + length];
+        let input_level = input_slice.iter().map(|&x| x.abs()).fold(0.0_f32, f32::max);
+        console_log!("Pre-processing input level: {}", input_level);
+
+        // Process samples with degrading quality
+        for i in (0..length).step_by(sample_skip) {
+            let sample = input_slice[i];
+
+            // Apply increasingly aggressive bit reduction
+            let scale = (1 << (self.bit_depth - 1)) as f32;
+            let processed = (sample * scale).round() / scale;
+
+            // Fill skipped samples with the same value (sample & hold)
+            for j in 0..sample_skip {
+                if i + j < length {
+                    self.output_buffer[offset + i + j] = processed;
+                }
+            }
+        }
+
+        let output_level = self.output_buffer[offset..offset + length]
+            .iter()
+            .map(|&x| x.abs())
+            .fold(0.0_f32, f32::max);
+        console_log!(
+            "Post-processing level: {}, bit_depth: {}, skip: {}",
+            output_level,
+            self.bit_depth,
+            sample_skip
+        );
     }
 
     #[wasm_bindgen]
-    pub fn set_bit_depth(&mut self, depth: u32) {
+    pub fn set_bit_depth(&mut self, depth: u8) {
         self.bit_depth = depth.clamp(4, 16);
         console_log!("Bit depth set to {}", self.bit_depth);
     }

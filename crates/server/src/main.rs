@@ -1,10 +1,11 @@
+use axum::response::IntoResponse;
 use axum::{
     extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade},
     extract::State,
     http::{HeaderName, HeaderValue, Method},
     response::Response,
     routing::get,
-    Router,
+    Json, Router,
 };
 use axum_server::Handle;
 use decay_server::config::Config;
@@ -12,6 +13,7 @@ use decay_server::types::{Message, User};
 use dotenv::dotenv;
 use env_logger::init;
 use futures_util::{sink::SinkExt, stream::StreamExt};
+use serde_json::json;
 use std::collections::HashSet;
 use std::{
     collections::HashMap,
@@ -61,7 +63,12 @@ async fn main() {
     // Create shutdown handle
     let handle = Handle::new();
 
-    println!("Starting HTTP server on {}", http_addr);
+    let display_addr = if http_addr.ip().is_unspecified() {
+        SocketAddr::new("127.0.0.1".parse().unwrap(), http_addr.port())
+    } else {
+        http_addr
+    };
+    println!("Starting HTTP server on http://{}", display_addr);
 
     // Start HTTP server
     let http_server = axum_server::bind(http_addr)
@@ -81,7 +88,12 @@ async fn main() {
             .key_path
             .expect("TLS enabled but no key path provided");
 
-        println!("Starting HTTPS server on {}", https_addr);
+        let display_https_addr = if https_addr.ip().is_unspecified() {
+            SocketAddr::new("127.0.0.1".parse().unwrap(), https_addr.port())
+        } else {
+            https_addr
+        };
+        println!("Starting HTTPS server on https://{}", display_https_addr);
 
         let config = axum_server::tls_rustls::RustlsConfig::from_pem_file(cert_path, key_path)
             .await
@@ -124,6 +136,7 @@ fn create_routes(users: Users) -> Router {
 
     Router::new()
         .route("/ws", get(ws_handler))
+        .route("/api/turn-credentials", get(turn_credentials_handler))
         .nest_service(
             "/static",
             ServeDir::new("www/static").append_index_html_on_directories(false),
@@ -339,6 +352,23 @@ async fn broadcast_user_list(users: &Users) {
     for state in users_lock.values() {
         let _ = state.tx.send(Ok(WsMessage::Text(message.clone())));
     }
+}
+
+async fn turn_credentials_handler() -> impl IntoResponse {
+    let credentials = json!({
+        "iceServers": [{
+            "urls": "stun:stun.l.google.com:19302"
+        }, {
+            "urls": [
+                "turn:global.relay.metered.ca:80",
+                "turn:global.relay.metered.ca:443"
+            ],
+            "username": std::env::var("TURN_USERNAME").unwrap_or_default(),
+            "credential": std::env::var("TURN_CREDENTIAL").unwrap_or_default()
+        }]
+    });
+
+    Json(credentials)
 }
 
 struct ConnectionState {

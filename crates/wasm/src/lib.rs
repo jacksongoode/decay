@@ -15,9 +15,3 @@ pub fn init() {
     std::panic::set_hook(Box::new(console_error_panic_hook::hook));
     log("WASM module initialized");
 }
-
-// This is required for proper WebAssembly initialization
-#[wasm_bindgen]
-pub fn init_panic_hook() {
-    console_error_panic_hook::set_once();
-}

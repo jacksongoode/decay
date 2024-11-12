@@ -349,8 +349,26 @@ class AudioDecayClient {
 
   async requestConnection(peerId) {
     try {
+      console.log(
+        "[AudioDecayClient] Starting connection request to peer:",
+        peerId,
+      );
+
       const { connectionState, audioManager } =
         this.initializeConnection(peerId);
+      if (!audioManager) {
+        throw new Error("Audio manager initialization failed");
+      }
+      console.log("[AudioDecayClient] Audio manager initialized");
+
+      // Verify audio context
+      if (audioManager.audioContext) {
+        console.log(
+          "[AudioDecayClient] Audio context state:",
+          audioManager.audioContext.state,
+        );
+      }
+
       this.activeConnection = peerId;
       this.updateUserList([...this.users.values()]);
 
@@ -386,7 +404,7 @@ class AudioDecayClient {
       this.ws.send(JSON.stringify(offerMsg));
       this.addLogEntry(`Sent connection request to User ${peerId}`, "connect");
     } catch (error) {
-      console.error("Connection request failed:", error);
+      console.error("[AudioDecayClient] Connection request failed:", error);
       this.activeConnection = null;
       this.addLogEntry(`Connection error: ${error.message}`, "disconnect");
       await this.cleanupConnection(peerId);
@@ -597,15 +615,21 @@ class AudioDecayClient {
       try {
         const stats = await audioManager.peerConnection.getStats();
         let bitrate = 0;
+        let audioLevel = 0;
 
         stats.forEach((report) => {
-          if (report.type === "inbound-rtp" && report.kind === "audio") {
+          if (
+            (report.type === "inbound-rtp" || report.type === "outbound-rtp") &&
+            report.kind === "audio"
+          ) {
             const now = report.timestamp;
-            const bytes = report.bytesReceived;
-            const timeDiff = (now - lastTimestamp) / 1000; // Convert to seconds
+            const bytes =
+              report.type === "inbound-rtp"
+                ? report.bytesReceived
+                : report.bytesSent;
+            const timeDiff = (now - lastTimestamp) / 1000;
 
             if (lastBytes > 0 && timeDiff > 0) {
-              // Calculate bitrate in kbps
               bitrate = Math.round(
                 ((bytes - lastBytes) * 8) / (timeDiff * 1000),
               );
@@ -613,11 +637,17 @@ class AudioDecayClient {
 
             lastBytes = bytes;
             lastTimestamp = now;
+
+            // Also monitor audio levels if available
+            if (report.audioLevel) {
+              audioLevel = Math.round(report.audioLevel * 100);
+            }
           }
         });
 
         connectionState.updateStats({
           bitrate,
+          audioLevel,
           elapsedTime: (Date.now() - startTime) / 1000,
         });
       } catch (error) {

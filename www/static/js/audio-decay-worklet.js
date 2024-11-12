@@ -1,19 +1,23 @@
 class AudioDecayProcessor extends AudioWorkletProcessor {
-  constructor() {
+  constructor(options) {
     super();
     this.initialized = false;
-    this.port.onmessage = this.handleMessage.bind(this);
-    this.port.postMessage({ type: "requestWasmMemory" });
-  }
+    this.bufferSize = 128;
 
-  handleMessage(event) {
-    if (event.data.type === "init") {
-      this.wasmMemoryBuffer = event.data.memory.buffer;
-      this.inputPtr = event.data.memory.inputPtr;
-      this.outputPtr = event.data.memory.outputPtr;
-      this.initialized = true;
-      console.log("[AudioDecayProcessor] WASM memory initialized");
-    }
+    this.port.onmessage = (event) => {
+      if (event.data.type === "init") {
+        this.wasmMemoryBuffer = event.data.memory.buffer;
+        this.inputPtr = event.data.memory.inputPtr;
+        this.outputPtr = event.data.memory.outputPtr;
+        this.initialized = true;
+        console.log("[AudioDecayProcessor] WASM memory initialized");
+      }
+    };
+
+    this.port.postMessage({
+      type: "requestWasmMemory",
+      bufferSize: this.bufferSize,
+    });
   }
 
   process(inputs, outputs) {
@@ -25,39 +29,48 @@ class AudioDecayProcessor extends AudioWorkletProcessor {
     }
 
     try {
-      for (let channel = 0; channel < input.length; channel++) {
-        const inputChannel = input[channel];
-        const outputChannel = output[channel];
+      for (let channelIndex = 0; channelIndex < input.length; channelIndex++) {
+        const inputChannel = input[channelIndex];
+        const outputChannel = output[channelIndex];
 
-        // Copy input to WASM memory
-        const inputBuffer = new Float32Array(
+        const rawInputLevel = Math.max(...inputChannel.map(Math.abs));
+        if (rawInputLevel > 0.01) {
+          console.log("[AudioDecayProcessor] Raw input level:", rawInputLevel);
+        }
+
+        const inputView = new Float32Array(
           this.wasmMemoryBuffer,
-          this.inputPtr + channel * inputChannel.length * 4,
+          this.inputPtr +
+            channelIndex * this.bufferSize * Float32Array.BYTES_PER_ELEMENT,
           inputChannel.length,
         );
-        inputBuffer.set(inputChannel);
+        inputView.set(inputChannel);
 
-        // Request processing synchronously
         this.port.postMessage({
           type: "processAudio",
-          channel: channel,
-          offset: channel * inputChannel.length,
+          offset: channelIndex * this.bufferSize,
           length: inputChannel.length,
         });
 
-        // Copy from WASM memory to output
-        const outputBuffer = new Float32Array(
+        const outputView = new Float32Array(
           this.wasmMemoryBuffer,
-          this.outputPtr + channel * inputChannel.length * 4,
+          this.outputPtr +
+            channelIndex * this.bufferSize * Float32Array.BYTES_PER_ELEMENT,
           inputChannel.length,
         );
-        outputChannel.set(outputBuffer);
-      }
-    } catch (error) {
-      console.error("[AudioDecayProcessor] Processing error:", error);
-    }
+        outputChannel.set(outputView);
 
-    return true;
+        const outputLevel = Math.max(...outputChannel.map(Math.abs));
+        if (outputLevel > 0.01) {
+          console.log("[AudioDecayProcessor] Output level:", outputLevel);
+        }
+      }
+
+      return true;
+    } catch (error) {
+      console.error("[AudioDecayProcessor] Process error:", error);
+      return true;
+    }
   }
 }
 

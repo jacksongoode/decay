@@ -14,30 +14,36 @@ export class AudioStreamManager {
   async handleRemoteTrack(track, stream) {
     try {
       console.log("[AudioStreamManager] Starting remote track handling");
+      console.log("[AudioStreamManager] Track kind:", track.kind);
+      console.log("[AudioStreamManager] Track state:", track.readyState);
 
-      // Initialize audio context
       if (!this.audioContext) {
         this.audioContext = new (window.AudioContext ||
           window.webkitAudioContext)();
         await this.audioContext.resume();
+        console.log(
+          "[AudioStreamManager] Audio context created:",
+          this.audioContext.state,
+        );
       }
 
-      // Create MediaStream from track
       const remoteStream = new MediaStream([track]);
       const source = this.audioContext.createMediaStreamSource(remoteStream);
+      console.log("[AudioStreamManager] Media stream source created");
 
-      // Initialize audio processor
       this.audioProcessor = new WasmAudioProcessor();
       this.audioProcessor.setAudioContext(this.audioContext);
+
+      // Add debug logging for setup stages
+      this.audioProcessor.onProcessorEvent = (event) => {
+        console.log("[AudioStreamManager] Processor event:", event);
+      };
+
       await this.audioProcessor.setupAudioProcessing(source);
-
-      // Start monitoring audio levels
-      this.startInputMonitoring();
-
-      console.log("[AudioStreamManager] Remote track handling complete");
+      console.log("[AudioStreamManager] Audio processing setup complete");
     } catch (error) {
       console.error(
-        "[AudioStreamManager] Failed to handle remote track:",
+        "[AudioStreamManager] Remote track handling failed:",
         error,
       );
       throw error;
@@ -122,40 +128,55 @@ export class AudioStreamManager {
 
   async createPeerConnection(onIceCandidate) {
     try {
-      // Fetch TURN credentials dynamically
-      const response = await fetch(
-        `https://audiodecay.metered.live/api/v1/turn/credentials?apiKey=${process.env.METERED_API_KEY}`,
-      );
-
-      let iceServers = [];
-
-      if (response.ok) {
-        iceServers = await response.json();
-      } else {
-        // Fallback to static configuration
-        iceServers = [
-          { urls: "stun:stun.l.google.com:19302" },
-          {
-            urls: "turn:global.relay.metered.ca:80",
-            username: process.env.TURN_USERNAME,
-            credential: process.env.TURN_CREDENTIAL,
-          },
-          {
-            urls: "turn:global.relay.metered.ca:443",
-            username: process.env.TURN_USERNAME,
-            credential: process.env.TURN_CREDENTIAL,
-          },
-        ];
-      }
-
-      this.peerConnection = new RTCPeerConnection({
-        iceServers,
+      // Fetch TURN credentials from our backend
+      const response = await fetch("/api/turn-credentials");
+      let config = {
+        iceServers: [
+          { urls: "stun:stun.l.google.com:19302" }, // Fallback STUN server
+        ],
         iceCandidatePoolSize: 10,
         bundlePolicy: "max-bundle",
         rtcpMuxPolicy: "require",
         sdpSemantics: "unified-plan",
         iceTransportPolicy: "all",
-      });
+      };
+
+      if (response.ok) {
+        const credentials = await response.json();
+        config.iceServers = credentials.iceServers;
+      }
+
+      this.peerConnection = new RTCPeerConnection(config);
+      console.log("[AudioStreamManager] PeerConnection created");
+
+      // Add track handling
+      this.peerConnection.ontrack = async (event) => {
+        console.log("[AudioStreamManager] Track received:", event.track.kind);
+        if (event.track.kind === "audio") {
+          await this.handleRemoteTrack(event.track, event.streams[0]);
+        }
+      };
+
+      // Add connection state logging
+      this.peerConnection.onconnectionstatechange = () => {
+        console.log(
+          "[AudioStreamManager] Connection state:",
+          this.peerConnection.connectionState,
+        );
+      };
+
+      this.peerConnection.oniceconnectionstatechange = () => {
+        console.log(
+          "[AudioStreamManager] ICE state:",
+          this.peerConnection.iceConnectionState,
+        );
+      };
+
+      // Add audio track
+      const audioTrack = await this.getAudioTrackWithFallback();
+      if (audioTrack) {
+        this.peerConnection.addTrack(audioTrack);
+      }
 
       // Reduce ICE candidate logging
       this.peerConnection.onicecandidate = (event) => {
@@ -164,35 +185,12 @@ export class AudioStreamManager {
         }
       };
 
-      // Only log state changes if they indicate a problem
-      this.peerConnection.oniceconnectionstatechange = () => {
-        const state = this.peerConnection.iceConnectionState;
-        if (state === "failed" || state === "disconnected") {
-          console.log("ICE Connection state:", state);
-        }
-      };
-
-      this.peerConnection.onconnectionstatechange = () => {
-        const state = this.peerConnection.connectionState;
-        if (state === "failed" || state === "disconnected") {
-          console.log("Connection state:", state);
-          this.cleanup();
-        }
-      };
-
-      this.peerConnection.ontrack = async (event) => {
-        console.log("[AudioStreamManager] Track received:", event.track.kind);
-        if (event.track.kind === "audio") {
-          await this.handleRemoteTrack(event.track, event.streams[0]);
-        }
-      };
-
-      const audioTrack = await this.getAudioTrackWithFallback();
-      this.peerConnection.addTrack(audioTrack);
-
       return this.peerConnection;
     } catch (error) {
-      console.error("PeerConnection failed:", error);
+      console.error(
+        "[AudioStreamManager] Failed to create peer connection:",
+        error,
+      );
       throw error;
     }
   }

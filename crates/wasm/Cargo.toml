@@ -7,7 +7,7 @@ edition = "2021"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-wasm-bindgen = "0.2"
+wasm-bindgen = { version = "0.2", features = ["serde-serialize"] }
 js-sys = "0.3"
 console_error_panic_hook = "0.1"
 rand = { version = "0.8.5", features = ["getrandom"] }
@@ -27,3 +27,6 @@ features = [
   "Window",
   "console",
 ]
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = ["-O4"]
