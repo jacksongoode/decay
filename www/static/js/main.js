@@ -172,11 +172,10 @@ class AudioDecayClient {
       return;
     }
 
-    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const port = window.location.protocol === "https:" ? "3443" : "3030";
-    this.ws = new WebSocket(
-      `${protocol}//${window.location.hostname}:${port}/ws`,
-    );
+    const wsUrl = PRODUCTION
+      ? `wss://${window.location.hostname}/ws`
+      : `ws://${window.location.hostname}:3030/ws`;
+    this.ws = new WebSocket(wsUrl);
 
     this.ws.onopen = () => {
       this.connected = true;
