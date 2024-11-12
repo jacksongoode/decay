@@ -128,8 +128,10 @@ export class AudioStreamManager {
 
   async createPeerConnection(onIceCandidate) {
     try {
-      // Fetch TURN credentials from our backend
-      const response = await fetch("/api/turn-credentials");
+      // Update the API endpoint to use your worker
+      const response = await fetch(
+        "https://audio-decay-worker.jacksongoode.workers.dev/api/turn-credentials",
+      );
       let config = {
         iceServers: [
           { urls: "stun:stun.l.google.com:19302" }, // Fallback STUN server

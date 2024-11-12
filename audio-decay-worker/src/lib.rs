@@ -48,31 +48,44 @@ enum Message {
 
 #[event(fetch)]
 pub async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
-    let router = Router::new();
+    // Add CORS headers for all responses
+    let cors_headers = Cors::new()
+        .with_origins(vec!["*"])
+        .with_methods(vec![Method::Get, Method::Post])
+        .with_headers(vec!["content-type"]);
 
-    router
-        .get("/", |_, _| Response::ok("Audio Decay Worker"))
-        .get_async("/api/turn-credentials", handle_turn_credentials)
+    Router::new()
+        .get("/", |_, _| {
+            let mut resp = Response::ok("Audio Decay Worker")?;
+            resp.headers_mut()?
+                .append("Access-Control-Allow-Origin", "*")?;
+            Ok(resp)
+        })
+        .get_async("/api/turn-credentials", |_, ctx| async move {
+            let credentials = json!({
+                "iceServers": [{
+                    "urls": "stun:stun.l.google.com:19302"
+                }, {
+                    "urls": [
+                        "turn:global.relay.metered.ca:80",
+                        "turn:global.relay.metered.ca:443"
+                    ],
+                    "username": ctx.env.secret("TURN_USERNAME")?.to_string(),
+                    "credential": ctx.env.secret("TURN_CREDENTIAL")?.to_string()
+                }]
+            });
+
+            let mut resp = Response::from_json(&credentials)?;
+            resp.headers_mut()?
+                .append("Access-Control-Allow-Origin", "*")?;
+            Ok(resp)
+        })
         .get_async("/ws", handle_ws)
+        .options("*", |_, _| {
+            Response::empty().map(|resp| cors_headers.apply(resp))
+        })
         .run(req, env)
         .await
-}
-
-async fn handle_turn_credentials(_req: Request, ctx: RouteContext<()>) -> Result<Response> {
-    let credentials = json!({
-        "iceServers": [{
-            "urls": "stun:stun.l.google.com:19302"
-        }, {
-            "urls": [
-                "turn:global.relay.metered.ca:80",
-                "turn:global.relay.metered.ca:443"
-            ],
-            "username": ctx.env.secret("TURN_USERNAME")?.to_string(),
-            "credential": ctx.env.secret("TURN_CREDENTIAL")?.to_string()
-        }]
-    });
-
-    Response::from_json(&credentials)
 }
 
 async fn handle_ws(mut _req: Request, _ctx: RouteContext<()>) -> Result<Response> {
