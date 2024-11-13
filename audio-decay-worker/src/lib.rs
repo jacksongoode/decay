@@ -48,17 +48,16 @@ enum Message {
 
 #[event(fetch)]
 pub async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
-    // Add CORS headers for all responses
     let cors_headers = Cors::new()
         .with_origins(vec!["*"])
-        .with_methods(vec![Method::Get, Method::Post])
-        .with_headers(vec!["content-type"]);
+        .with_methods(vec![Method::Get, Method::Post, Method::Options])
+        .with_allowed_headers(vec!["content-type"]);
 
     Router::new()
         .get("/", |_, _| {
             let mut resp = Response::ok("Audio Decay Worker")?;
-            resp.headers_mut()?
-                .append("Access-Control-Allow-Origin", "*")?;
+            resp.headers_mut()
+                .append("Access-Control-Allow-Origin", "*");
             Ok(resp)
         })
         .get_async("/api/turn-credentials", |_, ctx| async move {
@@ -76,13 +75,20 @@ pub async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
             });
 
             let mut resp = Response::from_json(&credentials)?;
-            resp.headers_mut()?
-                .append("Access-Control-Allow-Origin", "*")?;
+            resp.headers_mut()
+                .append("Access-Control-Allow-Origin", "*");
             Ok(resp)
         })
         .get_async("/ws", handle_ws)
         .options("*", |_, _| {
-            Response::empty().map(|resp| cors_headers.apply(resp))
+            let mut resp = Response::empty()?;
+            resp.headers_mut()
+                .append("Access-Control-Allow-Origin", "*");
+            resp.headers_mut()
+                .append("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+            resp.headers_mut()
+                .append("Access-Control-Allow-Headers", "content-type");
+            Ok(resp)
         })
         .run(req, env)
         .await

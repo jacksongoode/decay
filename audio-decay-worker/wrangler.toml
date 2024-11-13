@@ -119,8 +119,3 @@ command = "(command -v worker-build >/dev/null || cargo install -q worker-build)
 
 [vars]
 ENVIRONMENT = "production"
-
-# Define the secret variables that will be available
-[vars.secrets]
-TURN_USERNAME = ""
-TURN_CREDENTIAL = ""
