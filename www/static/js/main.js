@@ -1,5 +1,6 @@
 import { AudioStreamManager } from "./audio-stream.js";
 import { ConnectionState } from "./connection-state.js";
+import { isLocalhost } from "./utils.js";
 
 // Add environment configuration
 const PRODUCTION =
@@ -177,9 +178,12 @@ class AudioDecayClient {
       return;
     }
 
-    const wsUrl = PRODUCTION
-      ? `wss://audio-decay-worker.jacksongoode.workers.dev/ws`
-      : `ws://${window.location.hostname}:3030/ws`;
+    const isDevelopment = isLocalhost(window.location.hostname);
+    const wsUrl = isDevelopment
+      ? `wss://${window.location.host}/ws`
+      : "wss://audio-decay-worker.jacksongoode.workers.dev/ws";
+
+    console.log("[AudioDecayClient] Connecting to WebSocket:", wsUrl);
     this.ws = new WebSocket(wsUrl);
 
     this.ws.onopen = () => {

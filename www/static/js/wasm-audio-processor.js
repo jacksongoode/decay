@@ -65,21 +65,19 @@ export class WasmAudioProcessor {
             console.log("[WasmAudioProcessor] Sending WASM memory");
             this.sendWasmMemory();
           } else if (event.data.type === "processAudio") {
-            // Process audio synchronously
             console.log("[WasmAudioProcessor] Processing audio...");
-
-            // Process the audio with bit depth reduction
-            this.wasmProcessor.set_bit_depth(8); // Start with 8-bit reduction
+            
+            // Process the audio through WASM
             this.wasmProcessor.process_audio(
-              event.data.offset,
-              event.data.length,
+                event.data.offset,
+                event.data.length,
             );
 
             console.log("[WasmAudioProcessor] Audio processed");
 
-            // Signal completion
+            // Signal completion only after processing
             this.workletNode.port.postMessage({
-              type: "processingComplete",
+                type: "processingComplete",
             });
           }
         } catch (error) {

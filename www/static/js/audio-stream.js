@@ -1,4 +1,5 @@
 import { WasmAudioProcessor } from "./wasm-audio-processor.js";
+import { isLocalhost } from "./utils.js";
 
 export class AudioStreamManager {
   constructor(connectionState) {
@@ -128,13 +129,20 @@ export class AudioStreamManager {
 
   async createPeerConnection(onIceCandidate) {
     try {
-      // Update the API endpoint to use your worker
-      const response = await fetch(
-        "https://audio-decay-worker.jacksongoode.workers.dev/api/turn-credentials",
-      );
-      let config = {
+      const isDevelopment = isLocalhost(window.location.hostname);
+      const baseUrl = isDevelopment
+        ? `https://${window.location.host}`
+        : "https://audio-decay-worker.jacksongoode.workers.dev";
+
+      // Get TURN credentials from appropriate endpoint
+      const response = await fetch(`${baseUrl}/api/turn-credentials`);
+      const iceServers = await response.json();
+
+      const config = {
         iceServers: [
-          { urls: "stun:stun.l.google.com:19302" }, // Fallback STUN server
+          ...iceServers.iceServers,
+          { urls: "stun:stun1.l.google.com:19302" },
+          { urls: "stun:stun2.l.google.com:19302" },
         ],
         iceCandidatePoolSize: 10,
         bundlePolicy: "max-bundle",
@@ -143,13 +151,11 @@ export class AudioStreamManager {
         iceTransportPolicy: "all",
       };
 
-      if (response.ok) {
-        const credentials = await response.json();
-        config.iceServers = credentials.iceServers;
-      }
-
       this.peerConnection = new RTCPeerConnection(config);
-      console.log("[AudioStreamManager] PeerConnection created");
+      console.log(
+        "[AudioStreamManager] PeerConnection created with config:",
+        config,
+      );
 
       // Add track handling
       this.peerConnection.ontrack = async (event) => {

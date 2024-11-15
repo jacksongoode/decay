@@ -24,6 +24,8 @@ pub struct AudioProcessor {
     start_time: Option<f64>,
     decay_duration: f64,
     initial_bit_depth: u8,
+    phase_accumulator: f32,
+    previous_sample: f32,
 }
 
 #[wasm_bindgen]
@@ -41,6 +43,8 @@ impl AudioProcessor {
             buffer_position: 0,
             start_time: None,
             decay_duration: 30.0,
+            phase_accumulator: 0.0,
+            previous_sample: 0.0,
         }
     }
 
@@ -60,42 +64,11 @@ impl AudioProcessor {
             return;
         }
 
-        // Initialize start time if not set
-        if self.start_time.is_none() {
-            self.start_time = Some(js_sys::Date::now() / 1000.0);
-            self.initial_bit_depth = self.bit_depth;
-        }
-
-        // Calculate decay progress (0.0 to 1.0)
-        let current_time = js_sys::Date::now() / 1000.0;
-        let elapsed = current_time - self.start_time.unwrap();
-        let decay_progress = (elapsed / self.decay_duration).min(1.0);
-
-        // Degrade bit depth over time (from initial to 4 bits)
-        let target_bit_depth =
-            (self.initial_bit_depth as f64 * (1.0 - decay_progress) + 4.0 * decay_progress) as u8;
-        self.bit_depth = target_bit_depth.max(4);
-
-        // Calculate sample rate reduction (skip more samples as time progresses)
-        let sample_skip = ((decay_progress * 4.0) as usize).max(1);
-
-        let input_slice = &self.input_buffer[offset..offset + length];
-        let input_level = input_slice.iter().map(|&x| x.abs()).fold(0.0_f32, f32::max);
-        console_log!("Pre-processing input level: {}", input_level);
-
-        // Process samples with degrading quality
-        for i in (0..length).step_by(sample_skip) {
-            let sample = input_slice[i];
-
-            // Apply increasingly aggressive bit reduction
-            let scale = (1 << (self.bit_depth - 1)) as f32;
-            let processed = (sample * scale).round() / scale;
-
-            // Fill skipped samples with the same value (sample & hold)
-            for j in 0..sample_skip {
-                if i + j < length {
-                    self.output_buffer[offset + i + j] = processed;
-                }
+        // Simple pitch shift down one octave by reading at half speed
+        for i in 0..length {
+            let input_index = (i as f32 * 0.5) as usize;
+            if input_index < length {
+                self.output_buffer[offset + i] = self.input_buffer[offset + input_index];
             }
         }
 
@@ -104,10 +77,8 @@ impl AudioProcessor {
             .map(|&x| x.abs())
             .fold(0.0_f32, f32::max);
         console_log!(
-            "Post-processing level: {}, bit_depth: {}, skip: {}",
-            output_level,
-            self.bit_depth,
-            sample_skip
+            "Post-processing level: {}, pitch shifted down one octave",
+            output_level
         );
     }
 

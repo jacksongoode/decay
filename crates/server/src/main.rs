@@ -1,9 +1,8 @@
-use axum::response::IntoResponse;
 use axum::{
     extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade},
     extract::State,
     http::{HeaderName, HeaderValue, Method},
-    response::Response,
+    response::{IntoResponse, Response},
     routing::get,
     Json, Router,
 };
@@ -13,6 +12,7 @@ use decay_server::types::{Message, User};
 use dotenv::dotenv;
 use env_logger::init;
 use futures_util::{sink::SinkExt, stream::StreamExt};
+use local_ip_address::local_ip;
 use serde_json::json;
 use std::collections::HashSet;
 use std::{
@@ -26,10 +26,7 @@ use std::{
 };
 use tokio::sync::{mpsc, RwLock};
 use tower_http::{
-    cors::{Any, CorsLayer},
-    services::ServeDir,
-    set_header::SetResponseHeaderLayer,
-    trace::TraceLayer,
+    cors::CorsLayer, services::ServeDir, set_header::SetResponseHeaderLayer, trace::TraceLayer,
 };
 
 /// Our global unique user id counter.
@@ -55,19 +52,16 @@ async fn main() {
     // Create our application with routes
     let app = create_routes(users);
 
-    // Parse addresses
-    let http_addr: SocketAddr = format!("{}:{}", config.host, config.port)
+    // Parse addresses - bind to 0.0.0.0 instead of localhost
+    let http_addr: SocketAddr = format!("0.0.0.0:{}", config.port)
         .parse()
         .expect("Invalid HTTP address");
 
     // Create shutdown handle
     let handle = Handle::new();
 
-    let display_addr = if http_addr.ip().is_unspecified() {
-        SocketAddr::new("127.0.0.1".parse().unwrap(), http_addr.port())
-    } else {
-        http_addr
-    };
+    // For display purposes only, show localhost
+    let display_addr = SocketAddr::new("127.0.0.1".parse().unwrap(), http_addr.port());
     println!("Starting HTTP server on http://{}", display_addr);
 
     // Start HTTP server
@@ -125,14 +119,24 @@ async fn main() {
 }
 
 fn create_routes(users: Users) -> Router {
-    // Create CORS layer
+    // Create CORS layer for HTTPS only
+    let local_ip = local_ip().unwrap_or_else(|_| "127.0.0.1".parse().unwrap());
+
     let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods([Method::GET, Method::POST])
+        .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
         .allow_headers([
             HeaderName::from_static("content-type"),
             HeaderName::from_static("x-requested-with"),
-        ]);
+            HeaderName::from_static("authorization"),
+            HeaderName::from_static("x-forwarded-for"),
+        ])
+        .allow_origin([
+            "https://localhost".parse::<HeaderValue>().unwrap(),
+            format!("https://{}", local_ip)
+                .parse::<HeaderValue>()
+                .unwrap_or_else(|_| HeaderValue::from_static("https://localhost")),
+        ])
+        .allow_credentials(true);
 
     Router::new()
         .route("/ws", get(ws_handler))

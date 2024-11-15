@@ -3,6 +3,8 @@ class AudioDecayProcessor extends AudioWorkletProcessor {
     super();
     this.initialized = false;
     this.bufferSize = 128;
+    this.processingComplete = false;
+    this.lastProcessedBuffer = new Float32Array(this.bufferSize);
 
     this.port.onmessage = (event) => {
       if (event.data.type === "init") {
@@ -11,6 +13,14 @@ class AudioDecayProcessor extends AudioWorkletProcessor {
         this.outputPtr = event.data.memory.outputPtr;
         this.initialized = true;
         console.log("[AudioDecayProcessor] WASM memory initialized");
+      } else if (event.data.type === "processingComplete") {
+        const processedView = new Float32Array(
+          this.wasmMemoryBuffer,
+          this.outputPtr,
+          this.bufferSize,
+        );
+        this.lastProcessedBuffer.set(processedView);
+        this.processingComplete = true;
       }
     };
 
@@ -33,11 +43,6 @@ class AudioDecayProcessor extends AudioWorkletProcessor {
         const inputChannel = input[channelIndex];
         const outputChannel = output[channelIndex];
 
-        const rawInputLevel = Math.max(...inputChannel.map(Math.abs));
-        if (rawInputLevel > 0.01) {
-          console.log("[AudioDecayProcessor] Raw input level:", rawInputLevel);
-        }
-
         const inputView = new Float32Array(
           this.wasmMemoryBuffer,
           this.inputPtr +
@@ -52,17 +57,10 @@ class AudioDecayProcessor extends AudioWorkletProcessor {
           length: inputChannel.length,
         });
 
-        const outputView = new Float32Array(
-          this.wasmMemoryBuffer,
-          this.outputPtr +
-            channelIndex * this.bufferSize * Float32Array.BYTES_PER_ELEMENT,
-          inputChannel.length,
-        );
-        outputChannel.set(outputView);
-
-        const outputLevel = Math.max(...outputChannel.map(Math.abs));
-        if (outputLevel > 0.01) {
-          console.log("[AudioDecayProcessor] Output level:", outputLevel);
+        if (this.processingComplete) {
+          outputChannel.set(this.lastProcessedBuffer);
+        } else {
+          outputChannel.fill(0);
         }
       }
 
