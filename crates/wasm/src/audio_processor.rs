@@ -64,11 +64,13 @@ impl AudioProcessor {
             return;
         }
 
-        // Simple pitch shift down one octave by reading at half speed
+        // Process each sample individually for a simple pitch shift down one octave
         for i in 0..length {
-            let input_index = (i as f32 * 0.5) as usize;
-            if input_index < length {
-                self.output_buffer[offset + i] = self.input_buffer[offset + input_index];
+            let input_index = (offset + i) / 2; // Read at half speed for pitch shift
+            if input_index < BUFFER_SIZE {
+                self.output_buffer[offset + i] = self.input_buffer[input_index];
+            } else {
+                self.output_buffer[offset + i] = 0.0; // Handle out of bounds
             }
         }
 
