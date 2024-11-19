@@ -3,3 +3,4 @@ www/static/js/wasm/
 certs/
 web-audio-samples/
 .env
+.cursorignore
