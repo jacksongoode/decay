@@ -1,4 +1,4 @@
-# Experimenting with WASM Audio Processing with Audio Worklets
+# Experimenting with WASM & AudioWorklets
 
 ## Overview
 
@@ -50,3 +50,10 @@ This project demonstrates how to process audio in real-time using WebAssembly (W
 1. Clone the repo
 1. Run `./build.sh && cargo run -p decay-server`
 1. Open your browser and navigate to `https://localhost:3443`.
+
+
+## Resources
+- https://developer.chrome.com/blog/audio-worklet-design-pattern/
+- https://wasmbyexample.dev/examples/reading-and-writing-audio/reading-and-writing-audio.rust.en-us
+- https://www.toptal.com/webassembly/webassembly-rust-tutorial-web-audio
+- https://emscripten.org/docs/api_reference/wasm_audio_worklets.html
