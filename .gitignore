@@ -1,4 +1,5 @@
-/target
+target/
 www/static/js/wasm/
 certs/
+web-audio-samples/
 .env

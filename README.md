@@ -43,7 +43,6 @@ This project demonstrates how to process audio in real-time using WebAssembly (W
 
 - The audio processing is done in a single-threaded manner, but the architecture allows for easy integration of multiple audio processing nodes.
 - Each `AudioWorkletNode` can be connected to other nodes in the audio graph, allowing for complex audio processing chains.
-- The Wasm module can be reused across different worklets or audio nodes, enabling modular audio processing.
 
 ## Running the Demo
 
