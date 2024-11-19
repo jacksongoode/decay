@@ -21,11 +21,6 @@ pub struct AudioProcessor {
     sample_rate: f32,
     processing_enabled: bool,
     buffer_position: usize,
-    start_time: Option<f64>,
-    decay_duration: f64,
-    initial_bit_depth: u8,
-    phase_accumulator: f32,
-    previous_sample: f32,
 }
 
 #[wasm_bindgen]
@@ -37,14 +32,9 @@ impl AudioProcessor {
             input_buffer: vec![0.0; BUFFER_SIZE],
             output_buffer: vec![0.0; BUFFER_SIZE],
             bit_depth: 16,
-            initial_bit_depth: 16,
             sample_rate: 48000.0,
             processing_enabled: true,
             buffer_position: 0,
-            start_time: None,
-            decay_duration: 30.0,
-            phase_accumulator: 0.0,
-            previous_sample: 0.0,
         }
     }
 
@@ -85,31 +75,9 @@ impl AudioProcessor {
     }
 
     #[wasm_bindgen]
-    pub fn set_bit_depth(&mut self, depth: u8) {
-        self.bit_depth = depth.clamp(4, 16);
-        console_log!("Bit depth set to {}", self.bit_depth);
-    }
-
-    #[wasm_bindgen]
-    pub fn set_sample_rate(&mut self, rate: f32) {
-        self.sample_rate = rate;
-        console_log!("Sample rate set to {}", rate);
-    }
-
-    #[wasm_bindgen]
     pub fn enable_processing(&mut self, enabled: bool) {
         self.processing_enabled = enabled;
         console_log!("Processing enabled: {}", enabled);
-    }
-
-    #[wasm_bindgen]
-    pub fn get_buffer_size(&self) -> usize {
-        BUFFER_SIZE
-    }
-
-    #[wasm_bindgen]
-    pub fn get_buffer_position(&self) -> usize {
-        self.buffer_position
     }
 }
 
