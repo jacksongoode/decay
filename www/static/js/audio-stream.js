@@ -15,33 +15,35 @@ export class AudioStreamManager {
   async handleRemoteTrack(track, stream) {
     try {
       console.log("[AudioStreamManager] Starting remote track handling");
-      console.log("[AudioStreamManager] Track kind:", track.kind);
-      console.log("[AudioStreamManager] Track state:", track.readyState);
 
+      // Create audio context if needed
       if (!this.audioContext) {
         this.audioContext = new (window.AudioContext ||
-          window.webkitAudioContext)();
+          window.webkitAudioContext)({
+          latencyHint: "interactive",
+          sampleRate: 48000,
+        });
         await this.audioContext.resume();
-        console.log(
-          "[AudioStreamManager] Audio context created:",
-          this.audioContext.state,
-        );
       }
 
+      // Create MediaStream source from the remote track
       const remoteStream = new MediaStream([track]);
       const source = this.audioContext.createMediaStreamSource(remoteStream);
       console.log("[AudioStreamManager] Media stream source created");
 
+      // Initialize audio processor
       this.audioProcessor = new WasmAudioProcessor();
       this.audioProcessor.setAudioContext(this.audioContext);
 
-      // Add debug logging for setup stages
-      this.audioProcessor.onProcessorEvent = (event) => {
-        console.log("[AudioStreamManager] Processor event:", event);
-      };
-
+      // Connect source directly to the worklet
       await this.audioProcessor.setupAudioProcessing(source);
+
       console.log("[AudioStreamManager] Audio processing setup complete");
+      console.log("[AudioStreamManager] Final track state:", {
+        enabled: track.enabled,
+        muted: track.muted,
+        readyState: track.readyState,
+      });
     } catch (error) {
       console.error(
         "[AudioStreamManager] Remote track handling failed:",
@@ -52,25 +54,24 @@ export class AudioStreamManager {
   }
 
   startInputMonitoring() {
-    if (!this.audioContext || !this.audioProcessor) return;
+    if (!this.audioContext || !this.analyser) return;
 
-    // Create analyzer for monitoring
-    const analyzer = this.audioContext.createAnalyser();
-    analyzer.fftSize = 2048;
-
-    // Connect analyzer in parallel to processing chain
-    this.audioProcessor.sourceNode.connect(analyzer);
-
-    const dataArray = new Float32Array(analyzer.frequencyBinCount);
-
+    const dataArray = new Float32Array(this.analyser.frequencyBinCount);
     const checkLevel = () => {
-      analyzer.getFloatTimeDomainData(dataArray);
-      const level = Math.max(...dataArray.map(Math.abs));
-      console.log(`[AudioStreamManager] Input level: ${level.toFixed(4)}`);
+      if (!this.isProcessingAudio) return;
 
-      if (this.isProcessingAudio) {
-        requestAnimationFrame(checkLevel);
+      this.analyser.getFloatTimeDomainData(dataArray);
+      const level = Math.max(...dataArray.map(Math.abs));
+
+      if (level === 0) {
+        console.warn(
+          "[AudioStreamManager] Receiving silence - check input source",
+        );
+      } else {
+        console.log(`[AudioStreamManager] Input level: ${level.toFixed(4)}`);
       }
+
+      requestAnimationFrame(checkLevel);
     };
 
     this.isProcessingAudio = true;

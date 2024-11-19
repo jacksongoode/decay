@@ -1,67 +1,92 @@
+// audio-decay-worklet.js
+const RENDER_QUANTUM_FRAMES = 128;
+const PROCESSING_QUANTUM_FRAMES = 128; // Minimum frames needed for processing
+
 class AudioDecayProcessor extends AudioWorkletProcessor {
-  constructor(options) {
-    super();
-    this.initialized = false;
-    this.bufferSize = 128;
-    this.processingComplete = false;
-    this.lastProcessedBuffer = new Float32Array(this.bufferSize);
-
-    this.port.onmessage = (event) => {
-      if (event.data.type === "init") {
-        this.wasmMemoryBuffer = event.data.memory.buffer;
-        this.inputPtr = event.data.memory.inputPtr;
-        this.outputPtr = event.data.memory.outputPtr;
-        this.initialized = true;
-        console.log("[AudioDecayProcessor] WASM memory initialized");
-      } else if (event.data.type === "processingComplete") {
-        const processedView = new Float32Array(
-          this.wasmMemoryBuffer,
-          this.outputPtr,
-          this.bufferSize,
-        );
-        this.lastProcessedBuffer.set(processedView);
-        this.processingComplete = true;
-      }
-    };
-
-    this.port.postMessage({
-      type: "requestWasmMemory",
-      bufferSize: this.bufferSize,
-    });
+  static get parameterDescriptors() {
+    return [
+      {
+        name: "pitch",
+        defaultValue: 0.5,
+        minValue: 0.25,
+        maxValue: 2.0,
+      },
+    ];
   }
 
-  process(inputs, outputs) {
+  constructor(options) {
+    super();
+
+    this.initialized = false;
+    this.bufferSize = 128;
+    this.sampleRate = 48000;
+
+    try {
+      if (!options?.processorOptions) {
+        throw new Error("No processor options provided");
+      }
+
+      const { wasmMemory, inputPtr, outputPtr } = options.processorOptions;
+
+      // Initialize processor
+      this.initialized = true;
+      this.wasmMemoryBuffer = wasmMemory.buffer;
+      this.inputPtr = inputPtr;
+      this.outputPtr = outputPtr;
+
+      // Create WASM memory views
+      this.inputView = new Float32Array(
+        this.wasmMemoryBuffer,
+        this.inputPtr,
+        this.bufferSize,
+      );
+      this.outputView = new Float32Array(
+        this.wasmMemoryBuffer,
+        this.outputPtr,
+        this.bufferSize,
+      );
+
+      console.log(
+        "[AudioDecayProcessor] Initialized with buffer size:",
+        this.bufferSize,
+      );
+    } catch (error) {
+      console.error("[AudioDecayProcessor] Initialization failed:", error);
+      throw error;
+    }
+  }
+
+  process(inputs, outputs, parameters) {
+    if (!this.initialized) return true;
+
     const input = inputs[0];
     const output = outputs[0];
 
-    if (!input?.[0] || !output?.[0] || !this.initialized) {
+    if (!input?.[0] || !output?.[0]) {
       return true;
     }
 
     try {
-      for (let channelIndex = 0; channelIndex < input.length; channelIndex++) {
-        const inputChannel = input[channelIndex];
-        const outputChannel = output[channelIndex];
+      // Copy input to WASM buffer
+      const inputChannel = input[0];
+      this.inputView.set(inputChannel);
 
-        const inputView = new Float32Array(
-          this.wasmMemoryBuffer,
-          this.inputPtr +
-            channelIndex * this.bufferSize * Float32Array.BYTES_PER_ELEMENT,
-          inputChannel.length,
-        );
-        inputView.set(inputChannel);
+      // Process audio directly instead of posting message
+      // This should be synchronized with WASM
+      this.port.postMessage({
+        type: "processBuffer",
+        inputPtr: this.inputPtr,
+        outputPtr: this.outputPtr,
+        length: this.bufferSize,
+      });
 
-        this.port.postMessage({
-          type: "processAudio",
-          offset: channelIndex * this.bufferSize,
-          length: inputChannel.length,
-        });
+      // Copy processed output back
+      const outputChannel = output[0];
+      outputChannel.set(this.outputView);
 
-        if (this.processingComplete) {
-          outputChannel.set(this.lastProcessedBuffer);
-        } else {
-          outputChannel.fill(0);
-        }
+      // Copy to second channel if stereo
+      if (output[1]) {
+        output[1].set(outputChannel);
       }
 
       return true;
