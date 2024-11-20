@@ -1,7 +1,4 @@
 // audio-decay-worklet.js
-const RENDER_QUANTUM_FRAMES = 128;
-const PROCESSING_QUANTUM_FRAMES = 128; // Minimum frames needed for processing
-
 class AudioDecayProcessor extends AudioWorkletProcessor {
   static get parameterDescriptors() {
     return [
@@ -18,15 +15,23 @@ class AudioDecayProcessor extends AudioWorkletProcessor {
     super();
 
     this.initialized = false;
-    this.bufferSize = 128;
-    this.sampleRate = 48000;
 
     try {
       if (!options?.processorOptions) {
         throw new Error("No processor options provided");
       }
 
-      const { wasmMemory, inputPtr, outputPtr } = options.processorOptions;
+      const { wasmMemory, inputPtr, outputPtr, constants } =
+        options.processorOptions;
+
+      // Validate required parameters
+      if (!wasmMemory || !inputPtr || !outputPtr) {
+        throw new Error("Missing required WASM memory parameters");
+      }
+
+      // Store constants from processor options
+      this.bufferSize = constants.BUFFER_SIZE;
+      this.channelCount = constants.CHANNEL_COUNT;
 
       // Initialize processor
       this.initialized = true;
@@ -34,7 +39,7 @@ class AudioDecayProcessor extends AudioWorkletProcessor {
       this.inputPtr = inputPtr;
       this.outputPtr = outputPtr;
 
-      // Create WASM memory views
+      // Create WASM memory views using constants
       this.inputView = new Float32Array(
         this.wasmMemoryBuffer,
         this.inputPtr,
@@ -67,12 +72,14 @@ class AudioDecayProcessor extends AudioWorkletProcessor {
     }
 
     try {
-      // Copy input to WASM buffer
+      if (!this.inputView || !this.outputView) {
+        console.error("[AudioDecayProcessor] Views not initialized");
+        return true;
+      }
+
       const inputChannel = input[0];
       this.inputView.set(inputChannel);
 
-      // Process audio directly instead of posting message
-      // This should be synchronized with WASM
       this.port.postMessage({
         type: "processBuffer",
         inputPtr: this.inputPtr,
@@ -80,11 +87,9 @@ class AudioDecayProcessor extends AudioWorkletProcessor {
         length: this.bufferSize,
       });
 
-      // Copy processed output back
       const outputChannel = output[0];
       outputChannel.set(this.outputView);
 
-      // Copy to second channel if stereo
       if (output[1]) {
         output[1].set(outputChannel);
       }
@@ -92,6 +97,7 @@ class AudioDecayProcessor extends AudioWorkletProcessor {
       return true;
     } catch (error) {
       console.error("[AudioDecayProcessor] Process error:", error);
+      this.port.postMessage({ type: "error", error: error.message });
       return true;
     }
   }

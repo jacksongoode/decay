@@ -1,49 +1,190 @@
-import { WasmAudioProcessor } from "./wasm-audio-processor.js";
 import { isLocalhost } from "./utils.js";
+import { AUDIO_CONSTANTS } from "./audio-constants.js";
+
+async function initWasmProcessor() {
+  try {
+    // Import both JS and Wasm files
+    const wasmModule = await import("/static/wasm/decay_wasm.js");
+    const wasmInstance = await fetch("/static/wasm/decay_wasm_bg.wasm");
+
+    if (!wasmInstance.ok) {
+      throw new Error(`Failed to load WASM: ${wasmInstance.statusText}`);
+    }
+
+    const wasmBytes = await wasmInstance.arrayBuffer();
+
+    // Initialize the module with proper memory
+    await wasmModule.default({
+      env: {
+        memory: new WebAssembly.Memory({
+          initial: AUDIO_CONSTANTS.WASM_MEMORY.INITIAL,
+          maximum: AUDIO_CONSTANTS.WASM_MEMORY.MAXIMUM,
+          shared: true,
+        }),
+      },
+      buffer: wasmBytes,
+    });
+
+    const processor = new wasmModule.AudioProcessor();
+    console.log("[WasmAudioProcessor] WASM module initialized successfully");
+    return processor;
+  } catch (error) {
+    console.error("[WasmAudioProcessor] Failed to initialize WASM:", error);
+    throw error;
+  }
+}
+
+class WasmAudioProcessor {
+  constructor() {
+    this.audioContext = null;
+    this.workletNode = null;
+    this.wasmProcessor = null;
+    this.wasmMemory = null;
+    this.sourceNode = null;
+  }
+
+  setAudioContext(context) {
+    if (!context) {
+      throw new Error("AudioContext is required");
+    }
+    this.audioContext = context;
+    console.log("[WasmAudioProcessor] Audio context set:", context.state);
+  }
+
+  async setupAudioProcessing(sourceNode) {
+    try {
+      // Double-check audio context is set and running
+      if (!this.audioContext) {
+        throw new Error("AudioContext not initialized");
+      }
+
+      if (this.audioContext.state !== "running") {
+        await this.audioContext.resume();
+      }
+
+      this.sourceNode = sourceNode;
+      console.log("[WasmAudioProcessor] Starting setup");
+
+      // Initialize WASM memory using constants
+      this.wasmMemory = new WebAssembly.Memory({
+        initial: AUDIO_CONSTANTS.WASM_MEMORY.INITIAL,
+        maximum: AUDIO_CONSTANTS.WASM_MEMORY.MAXIMUM,
+        shared: true,
+      });
+
+      // Load worklet first
+      const workletUrl = new URL(
+        "/static/js/audio-decay-worklet.js",
+        window.location.href,
+      );
+      await this.audioContext.audioWorklet.addModule(workletUrl);
+
+      // Then initialize WASM
+      if (!this.wasmProcessor) {
+        this.wasmProcessor = await initWasmProcessor();
+      }
+
+      // Create worklet node
+      this.workletNode = new AudioWorkletNode(
+        this.audioContext,
+        "audio-decay-processor",
+        {
+          numberOfInputs: 1,
+          numberOfOutputs: 1,
+          channelCount: AUDIO_CONSTANTS.CHANNEL_COUNT,
+          processorOptions: {
+            wasmMemory: this.wasmMemory,
+            inputPtr: this.wasmProcessor.get_input_buffer_ptr(),
+            outputPtr: this.wasmProcessor.get_output_buffer_ptr(),
+            constants: AUDIO_CONSTANTS,
+          },
+        },
+      );
+
+      // Connect nodes
+      this.sourceNode.connect(this.workletNode);
+      this.workletNode.connect(this.audioContext.destination);
+
+      console.log("[WasmAudioProcessor] Setup complete");
+    } catch (error) {
+      console.error("[WasmAudioProcessor] Setup failed:", error);
+      throw error;
+    }
+  }
+
+  async cleanup() {
+    try {
+      if (this.sourceNode) {
+        this.sourceNode.disconnect();
+        this.sourceNode = null;
+      }
+
+      if (this.workletNode) {
+        this.workletNode.port.onmessage = null;
+        this.workletNode.disconnect();
+        this.workletNode = null;
+      }
+
+      this.wasmProcessor = null;
+      this.wasmMemory = null;
+    } catch (error) {
+      console.warn("[WasmAudioProcessor] Cleanup error:", error);
+    }
+  }
+}
 
 export class AudioStreamManager {
   constructor(connectionState) {
-    this.stream = null;
-    this.peerConnection = null;
-    this.connectionState = connectionState;
     this.audioContext = null;
-    this.audioProcessor = null;
+    this.wasmProcessor = null;
+    this.connectionState = connectionState;
     this.isProcessingAudio = false;
     this.analyser = null;
   }
 
-  async handleRemoteTrack(track, stream) {
+  async initializeAudio() {
     try {
-      console.log("[AudioStreamManager] Starting remote track handling");
-
-      // Create audio context if needed
       if (!this.audioContext) {
-        this.audioContext = new (window.AudioContext ||
-          window.webkitAudioContext)({
-          latencyHint: "interactive",
-          sampleRate: 48000,
+        this.audioContext = new AudioContext({
+          latencyHint: AUDIO_CONSTANTS.LATENCY_HINT,
         });
+
+        // Create and initialize the processor after context is created
+        this.wasmProcessor = new WasmAudioProcessor();
+        this.wasmProcessor.setAudioContext(this.audioContext);
+
+        console.log("[AudioStreamManager] Audio context initialized:", {
+          state: this.audioContext.state,
+        });
+      }
+
+      if (this.audioContext.state !== "running") {
         await this.audioContext.resume();
       }
 
-      // Create MediaStream source from the remote track
-      const remoteStream = new MediaStream([track]);
-      const source = this.audioContext.createMediaStreamSource(remoteStream);
+      console.log(
+        "[AudioStreamManager] Audio context state:",
+        this.audioContext.state,
+      );
+    } catch (error) {
+      console.error("[AudioStreamManager] Audio initialization failed:", error);
+      throw error;
+    }
+  }
+
+  async handleRemoteTrack(track) {
+    try {
+      // Ensure audio is initialized first
+      await this.initializeAudio();
+
+      // Create media stream source only after audio context is ready
+      const sourceNode = this.audioContext.createMediaStreamSource(
+        new MediaStream([track]),
+      );
       console.log("[AudioStreamManager] Media stream source created");
 
-      // Initialize audio processor
-      this.audioProcessor = new WasmAudioProcessor();
-      this.audioProcessor.setAudioContext(this.audioContext);
-
-      // Connect source directly to the worklet
-      await this.audioProcessor.setupAudioProcessing(source);
-
-      console.log("[AudioStreamManager] Audio processing setup complete");
-      console.log("[AudioStreamManager] Final track state:", {
-        enabled: track.enabled,
-        muted: track.muted,
-        readyState: track.readyState,
-      });
+      // Pass both the context and source node to setup
+      await this.wasmProcessor.setupAudioProcessing(sourceNode);
     } catch (error) {
       console.error(
         "[AudioStreamManager] Remote track handling failed:",
@@ -91,41 +232,6 @@ export class AudioStreamManager {
 
     // Check every second
     setInterval(checkContext, 1000);
-  }
-
-  async initializeAudio() {
-    if (this.audioContext) return;
-
-    try {
-      const AudioContext = window.AudioContext || window.webkitAudioContext;
-
-      if (!AudioContext) {
-        throw new Error("AudioContext not supported");
-      }
-
-      this.audioContext = new AudioContext({
-        latencyHint: "interactive",
-      });
-
-      this.audioContext.onstatechange = () => {
-        console.log(
-          "[AudioStreamManager] Audio context state:",
-          this.audioContext.state,
-        );
-      };
-
-      if (this.audioContext.state === "suspended") {
-        await this.audioContext.resume();
-      }
-
-      console.log("[AudioStreamManager] Audio context initialized:", {
-        state: this.audioContext.state,
-        sampleRate: this.audioContext.sampleRate,
-      });
-    } catch (error) {
-      console.error("[AudioStreamManager] Failed to initialize audio:", error);
-      throw error;
-    }
   }
 
   async createPeerConnection(onIceCandidate) {
@@ -252,9 +358,9 @@ export class AudioStreamManager {
     try {
       this.isProcessingAudio = false;
 
-      if (this.audioProcessor) {
-        await this.audioProcessor.cleanup();
-        this.audioProcessor = null;
+      if (this.wasmProcessor) {
+        await this.wasmProcessor.cleanup();
+        this.wasmProcessor = null;
       }
 
       if (this.peerConnection) {

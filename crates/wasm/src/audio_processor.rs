@@ -17,10 +17,7 @@ const BUFFER_SIZE: usize = 128;
 pub struct AudioProcessor {
     input_buffer: Vec<f32>,
     output_buffer: Vec<f32>,
-    bit_depth: u8,
-    sample_rate: f32,
     processing_enabled: bool,
-    buffer_position: usize,
 }
 
 #[wasm_bindgen]
@@ -31,10 +28,7 @@ impl AudioProcessor {
         Self {
             input_buffer: vec![0.0; BUFFER_SIZE],
             output_buffer: vec![0.0; BUFFER_SIZE],
-            bit_depth: 16,
-            sample_rate: 48000.0,
             processing_enabled: true,
-            buffer_position: 0,
         }
     }
 

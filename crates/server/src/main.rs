@@ -1,7 +1,7 @@
 use axum::{
     extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade},
     extract::State,
-    http::{HeaderName, HeaderValue, Method},
+    http::{self, HeaderName, HeaderValue, Method},
     response::{IntoResponse, Response},
     routing::get,
     Json, Router,
@@ -52,76 +52,42 @@ async fn main() {
     // Create our application with routes
     let app = create_routes(users);
 
-    // Parse addresses - bind to 0.0.0.0 instead of localhost
-    let http_addr: SocketAddr = format!("0.0.0.0:{}", config.port)
+    let https_addr: SocketAddr = format!("{}:{}", config.host, config.tls_port)
         .parse()
-        .expect("Invalid HTTP address");
+        .expect("Invalid HTTPS address");
+
+    let cert_path = config
+        .cert_path
+        .expect("TLS enabled but no cert path provided");
+    let key_path = config
+        .key_path
+        .expect("TLS enabled but no key path provided");
+
+    let display_https_addr = if https_addr.ip().is_unspecified() {
+        SocketAddr::new("127.0.0.1".parse().unwrap(), https_addr.port())
+    } else {
+        https_addr
+    };
+    println!("Starting HTTPS server on https://{}", display_https_addr);
+
+    let config = axum_server::tls_rustls::RustlsConfig::from_pem_file(cert_path, key_path)
+        .await
+        .expect("Failed to load TLS config");
 
     // Create shutdown handle
     let handle = Handle::new();
 
-    // For display purposes only, show localhost
-    let display_addr = SocketAddr::new("127.0.0.1".parse().unwrap(), http_addr.port());
-    println!("Starting HTTP server on http://{}", display_addr);
+    let https_server = axum_server::bind_rustls(https_addr, config)
+        .handle(handle)
+        .serve(app.into_make_service());
 
-    // Start HTTP server
-    let http_server = axum_server::bind(http_addr)
-        .handle(handle.clone())
-        .serve(app.clone().into_make_service());
-
-    // If TLS is enabled, also start HTTPS server
-    if config.tls_enabled {
-        let https_addr: SocketAddr = format!("{}:{}", config.host, config.tls_port)
-            .parse()
-            .expect("Invalid HTTPS address");
-
-        let cert_path = config
-            .cert_path
-            .expect("TLS enabled but no cert path provided");
-        let key_path = config
-            .key_path
-            .expect("TLS enabled but no key path provided");
-
-        let display_https_addr = if https_addr.ip().is_unspecified() {
-            SocketAddr::new("127.0.0.1".parse().unwrap(), https_addr.port())
-        } else {
-            https_addr
-        };
-        println!("Starting HTTPS server on https://{}", display_https_addr);
-
-        let config = axum_server::tls_rustls::RustlsConfig::from_pem_file(cert_path, key_path)
-            .await
-            .expect("Failed to load TLS config");
-
-        let https_server = axum_server::bind_rustls(https_addr, config)
-            .handle(handle)
-            .serve(app.into_make_service());
-
-        // Run both servers
-        tokio::select! {
-            result = http_server => {
-                if let Err(e) = result {
-                    eprintln!("HTTP server error: {}", e);
-                }
-            }
-            result = https_server => {
-                if let Err(e) = result {
-                    eprintln!("HTTPS server error: {}", e);
-                }
-            }
-        }
-    } else {
-        // Just run HTTP server
-        if let Err(e) = http_server.await {
-            eprintln!("HTTP server error: {}", e);
-        }
+    if let Err(e) = https_server.await {
+        eprintln!("HTTPS server error: {}", e);
     }
 }
 
 fn create_routes(users: Users) -> Router {
-    // Create CORS layer for HTTPS only
-    let local_ip = local_ip().unwrap_or_else(|_| "127.0.0.1".parse().unwrap());
-
+    // Create CORS layer
     let cors = CorsLayer::new()
         .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
         .allow_headers([
@@ -132,21 +98,44 @@ fn create_routes(users: Users) -> Router {
         ])
         .allow_origin([
             "https://localhost".parse::<HeaderValue>().unwrap(),
-            format!("https://{}", local_ip)
-                .parse::<HeaderValue>()
-                .unwrap_or_else(|_| HeaderValue::from_static("https://localhost")),
+            format!(
+                "https://{}",
+                local_ip().unwrap_or_else(|_| "127.0.0.1".parse().unwrap())
+            )
+            .parse::<HeaderValue>()
+            .unwrap_or_else(|_| HeaderValue::from_static("https://localhost")),
         ])
         .allow_credentials(true);
+
+    // Create static file service with proper MIME types
+    let static_files = ServeDir::new("www")
+        .append_index_html_on_directories(true)
+        .fallback(ServeDir::new("www").append_index_html_on_directories(true))
+        .precompressed_gzip()
+        .precompressed_br();
 
     Router::new()
         .route("/ws", get(ws_handler))
         .route("/api/turn-credentials", get(turn_credentials_handler))
-        .nest_service(
-            "/static",
-            ServeDir::new("www/static").append_index_html_on_directories(false),
-        )
-        .fallback_service(ServeDir::new("www").append_index_html_on_directories(true))
+        // Add content type headers for specific file types
+        .layer(SetResponseHeaderLayer::overriding(
+            http::header::CONTENT_TYPE,
+            |response: &Response| {
+                let path = response.extensions().get::<String>();
+                path.and_then(|p| {
+                    if p.ends_with(".wasm") {
+                        Some(HeaderValue::from_static("application/wasm"))
+                    } else if p.ends_with(".js") {
+                        Some(HeaderValue::from_static("application/javascript"))
+                    } else {
+                        None
+                    }
+                })
+            },
+        ))
+        .fallback_service(static_files)
         .layer(cors)
+        // Add security headers
         .layer(SetResponseHeaderLayer::if_not_present(
             HeaderName::from_static("cross-origin-opener-policy"),
             HeaderValue::from_static("same-origin"),

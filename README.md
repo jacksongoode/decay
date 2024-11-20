@@ -52,3 +52,4 @@ This project demonstrates how to process audio in real-time using WebAssembly (W
 - https://wasmbyexample.dev/examples/reading-and-writing-audio/reading-and-writing-audio.rust.en-us
 - https://www.toptal.com/webassembly/webassembly-rust-tutorial-web-audio
 - https://emscripten.org/docs/api_reference/wasm_audio_worklets.html
+- https://dev.to/speratus/how-i-used-wasm-pack-to-build-a-webassembly-module-for-an-audioworkletprocessor-4aa7
