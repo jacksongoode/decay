@@ -1,0 +1,15 @@
+{
+  "name": "audio-decay",
+  "version": "1.0.0",
+  "description": "P2P audio streaming demo",
+  "scripts": {
+    "start": "cargo run -p decay-server",
+    "build": "./build.sh",
+    "dev": "bun run start"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "eslint": "^8.0.0",
+    "prettier": "^2.0.0"
+  }
+}

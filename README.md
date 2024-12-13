@@ -1,8 +1,14 @@
-# Experimenting with WASM & AudioWorklets
+# P2P Audio Connection Demo
 
 ## Overview
 
-This project demonstrates how to process audio in real-time using WebAssembly (Wasm) and the Web Audio API. The main goal is to process audio samples using a custom audio processor implemented in Rust and compiled to Wasm. It establishes a peer-to-peer (P2P) connection to stream audio between browsers with minimal latency.
+This project demonstrates real-time peer-to-peer audio streaming using WebRTC and the Web Audio API.
+
+## Features
+
+- Direct browser-to-browser audio streaming
+- Low-latency audio transmission
+- Simple signaling server for connection establishment
 
 ## Project Structure
 

@@ -1,6 +1,9 @@
 target/
 www/static/js/wasm/
 certs/
+wasm-audio-worklet/
 web-audio-samples/
 .env
 .cursorignore
+node_modules/
++ bun.lockb

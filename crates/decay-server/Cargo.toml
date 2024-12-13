@@ -1,0 +1,14 @@
+[package]
+name = "decay-server"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "decay-server"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { workspace = true }
+warp = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }

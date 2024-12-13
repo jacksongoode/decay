@@ -357,64 +357,53 @@ class AudioDecayClient {
 
   async requestConnection(peerId) {
     try {
-      console.log(
-        "[AudioDecayClient] Starting connection request to peer:",
-        peerId,
-      );
+      const { connectionState, audioManager } = this.initializeConnection(peerId);
+      
+      // Initialize audio context and processing first
+      await audioManager.initializeAudioContext();
+      
+      // Create peer connection
+      const peerConnection = await audioManager.createPeerConnection((event) => {
+        if (event.candidate) {
+          this.ws.send(JSON.stringify({
+            type: "RTCCandidate",
+            from_id: this.userId,
+            to_id: peerId,
+            candidate: JSON.stringify(event.candidate)
+          }));
+        }
+      });
 
-      const { connectionState, audioManager } =
-        this.initializeConnection(peerId);
-      if (!audioManager) {
-        throw new Error("Audio manager initialization failed");
-      }
-      console.log("[AudioDecayClient] Audio manager initialized");
+      // Get user media and add tracks
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        audio: {
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false
+        }
+      });
 
-      // Verify audio context
-      if (audioManager.audioContext) {
-        console.log(
-          "[AudioDecayClient] Audio context state:",
-          audioManager.audioContext.state,
-        );
-      }
+      stream.getAudioTracks().forEach(track => {
+        peerConnection.addTrack(track, stream);
+      });
 
       this.activeConnection = peerId;
       this.updateUserList([...this.users.values()]);
 
-      const onIceCandidate = (event) => {
-        if (event.candidate) {
-          const candidateMsg = {
-            type: "RTCCandidate",
-            from_id: this.userId,
-            to_id: peerId,
-            candidate: JSON.stringify(event.candidate),
-          };
-          this.ws.send(JSON.stringify(candidateMsg));
-        }
-      };
-
-      const peerConnection =
-        await audioManager.createPeerConnection(onIceCandidate);
-
-      // Create and send the offer with audio transceivers
-      const offer = await peerConnection.createOffer({
-        offerToReceiveAudio: true,
-      });
-
+      // Create and send offer
+      const offer = await peerConnection.createOffer();
       await peerConnection.setLocalDescription(offer);
 
-      const offerMsg = {
+      this.ws.send(JSON.stringify({
         type: "RTCOffer",
         from_id: this.userId,
         to_id: peerId,
-        offer: JSON.stringify(offer),
-      };
+        offer: JSON.stringify(offer)
+      }));
 
-      this.ws.send(JSON.stringify(offerMsg));
-      this.addLogEntry(`Sent connection request to User ${peerId}`, "connect");
     } catch (error) {
-      console.error("[AudioDecayClient] Connection request failed:", error);
+      console.error("Connection request failed:", error);
       this.activeConnection = null;
-      this.addLogEntry(`Connection error: ${error.message}`, "disconnect");
       await this.cleanupConnection(peerId);
       throw error;
     }
